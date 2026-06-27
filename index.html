@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reliable Serverless Audio Call</title>
-    <!-- Include Metered's production-ready WebRTC SDK -->
+    <title>Fixed Serverless Audio Call</title>
+    <!-- Use Metered's Core WebRTC SDK instead of the visual Frame SDK -->
     <script src="https://metered.ca"></script>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
@@ -13,69 +13,96 @@
         .start { background: #10b981; color: white; }
         .hangup { background: #ef4444; color: white; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        #status { margin-top: 15px; font-weight: bold; color: #555; }
+        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; }
         input { padding: 10px; width: 80%; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; text-align: center; }
     </style>
 </head>
 <body>
 
 <div class="card">
-    <h2>Secure Audio Call</h2>
-    <input type="text" id="roomInput" placeholder="Enter Meeting Room (e.g., call99)">
+    <h2>Secure Voice Link</h2>
+    <input type="text" id="roomInput" placeholder="Enter Room (e.g., talk123)" value="talk123">
     <br>
-    <button id="joinBtn" class="start">📞 Join Room & Call</button>
+    <button id="joinBtn" class="start">📞 Join Call</button>
     <button id="hangupBtn" class="hangup" style="display:none;">🛑 Leave Call</button>
-    <div id="status">Status: Enter a shared room name to begin</div>
+    <div id="status">Status: Ready. Make sure the room exists in Metered dashboard.</div>
 </div>
 
+<!-- Raw audio elements for hardware routing -->
+<audio id="remoteAudio" autoplay></audio>
+
 <script>
-    // ⚠️ PASTE YOUR METERED APP ID HERE
+    // ⚠️ REPLACE WITH YOUR EXACT PREFIX (e.g., "mytestapp")
     const METERED_APP_ID = "myaudioapp"; 
 
-    let meetingFrame = null;
+    let meeting = null;
     const roomInput = document.getElementById('roomInput');
     const joinBtn = document.getElementById('joinBtn');
     const hangupBtn = document.getElementById('hangupBtn');
     const statusDiv = document.getElementById('status');
+    const remoteAudio = document.getElementById('remoteAudio');
 
     joinBtn.onclick = async () => {
         const roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!roomName) return alert("Please enter a room name");
 
-        statusDiv.innerText = "Status: Connecting to private infrastructure...";
+        statusDiv.innerText = "Status: Connecting to network...";
         joinBtn.disabled = true;
 
         try {
-            // Initialize Metered connection into your specified room name
-            meetingFrame = new MeteredFrame();
-            await meetingFrame.init({
-                roomURL: `${METERED_APP_ID}.metered.live/${roomName}`,
-                embedded: false // Opens native browser audio handlers
+            // 1. Create a pure background Meeting instance instead of a visual iframe frame
+            meeting = new metered.Meeting();
+            
+            // 2. Target the specific room connection endpoint directly
+            const targetRoomURL = `${METERED_APP_ID}.metered.live/${roomName}`;
+            statusDiv.innerText = `Status: Accessing room url: ${targetRoomURL}`;
+
+            await meeting.join({
+                roomURL: targetRoomURL,
+                name: "User-" + Math.floor(Math.random() * 100) // Assign random username
             });
 
-            // Automatically turn on microphone and join the WebRTC channel
-            await meetingFrame.join({
-                audioActive: true,
-                videoActive: false
-            });
+            statusDiv.innerText = "Status: Room joined! Activating microphone...";
 
-            statusDiv.innerText = `Status: Inside Room "${roomName}". Audio connected!`;
+            // 3. Request user microphone explicitly after successfully joining
+            await meeting.startAudio();
+            
+            statusDiv.innerText = `Status: Live in "${roomName}". Waiting for peer audio...`;
             joinBtn.style.display = "none";
             roomInput.style.display = "none";
             hangupBtn.style.display = "inline-block";
 
+            // 4. Handle incoming remote participant audio track
+            meeting.on("remoteTrackStarted", (trackItem) => {
+                if (trackItem.type === "audio") {
+                    statusDiv.innerText = "Status: Connected! Streaming peer voice.";
+                    
+                    // Attach the remote track stream directly into our player object
+                    const remoteStream = new MediaStream([trackItem.track]);
+                    remoteAudio.srcObject = remoteStream;
+                }
+            });
+
+            // Handle peer disconnecting
+            meeting.on("remoteTrackStopped", (trackItem) => {
+                statusDiv.innerText = "Status: Peer stopped speaking or left.";
+                remoteAudio.srcObject = null;
+            });
+
         } catch (error) {
-            console.error(error);
-            statusDiv.innerText = "Status: Connection Failed. Check App ID or Mic permissions.";
+            console.error("WebRTC Error Context:", error);
+            statusDiv.innerText = `Error: ${error.message || "Failed to link. Verify App ID & Room settings."}`;
             joinBtn.disabled = false;
         }
     };
 
     hangupBtn.onclick = async () => {
-        if (meetingFrame) {
-            await meetingFrame.leave();
+        if (meeting) {
+            await meeting.stopAudio();
+            await meeting.leave();
         }
-        statusDiv.innerText = "Status: Call Left";
+        remoteAudio.srcObject = null;
+        statusDiv.innerText = "Status: Call disconnected.";
         joinBtn.style.display = "inline-block";
         roomInput.style.display = "inline-block";
         hangupBtn.style.display = "none";
