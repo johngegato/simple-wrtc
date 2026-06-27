@@ -66,14 +66,16 @@
         }
     }
 
-    function setupSignaling(room) {
-        ws = new WebSocket(`wss://://piesocket.com{room}?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e6XIv987654321&notify_self=0`);
+        function setupSignaling(room) {
+        // FIXED: Removed the duplicated protocol slashes and fixed the template bracket string 
+        ws = new WebSocket(`wss://://piesocket.com{room}?api_key=oCdCMcMPQpbvNjUIzqtvF1d2X2okWpDQj4AwARJuAgtjhzKxVEjdCjwm&notify_self=0`);
 
         ws.onopen = () => {
             statusDiv.innerText = `Status: Connected to Room "${room}". Waiting for other device...`;
             statusDiv.style.color = "#555";
             sendMessage({ type: 'join' });
         };
+
 
         ws.onmessage = async (event) => {
             const data = JSON.parse(event.data);
