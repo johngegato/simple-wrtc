@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Symmetric Serverless Audio Call</title>
     <!-- Metered Production WebRTC SDK -->
-    <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
+    <script src="https://metered.ca"></script>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
         .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
@@ -28,7 +28,8 @@
     <div id="status">Status: Checking SDK configuration...</div>
 </div>
 
-<audio id="remoteAudio" autoplay controls style="display:none;"></audio>
+<!-- Raw audio elements for hardware streaming -->
+<audio id="remoteAudio" autoplay></audio>
 
 <script>
     // ⚠️ REPLACE WITH YOUR ACTUAL METERED PREFIX
@@ -41,10 +42,9 @@
     const statusDiv = document.getElementById('status');
     const remoteAudio = document.getElementById('remoteAudio');
 
-    // Run a health check on script load
     window.onload = () => {
         if (typeof Metered === 'undefined') {
-            statusDiv.innerText = "Error: Metered SDK blocked by browser security. Ensure you are loading via HTTPS on Vercel.";
+            statusDiv.innerText = "Error: Metered SDK blocked. Ensure you are loading via HTTPS on Vercel.";
             statusDiv.style.color = "#ef4444";
         } else {
             statusDiv.innerText = "Status: SDK ready. Make sure room exists in your dashboard.";
@@ -52,19 +52,16 @@
     };
 
     function handleIncomingAudioTrack(trackItem) {
-        if (trackItem.type === "audio") {
+        if (trackItem && trackItem.type === "audio" && trackItem.track) {
             statusDiv.innerText = "Status: Connected! Streaming peer voice.";
             const remoteStream = new MediaStream([trackItem.track]);
             remoteAudio.srcObject = remoteStream;
-            remoteAudio.play().catch(e => console.log("Playback interaction catch:", e));
+            remoteAudio.play().catch(e => console.log("Playback gesture catch:", e));
         }
     }
 
     joinBtn.onclick = async () => {
-        if (typeof Metered === 'undefined') {
-            alert("The Metered SDK failed to load. You must use an HTTPS (Vercel) link to test WebRTC applications.");
-            return;
-        }
+        if (typeof Metered === 'undefined') return alert("The SDK failed to load. Use HTTPS.");
 
         const roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!roomName) return alert("Please enter a room name");
@@ -73,7 +70,6 @@
         joinBtn.disabled = true;
 
         try {
-            // Explicit safely wrapped global instantiation
             meeting = new window.Metered.Meeting();
             const targetRoomURL = `${METERED_APP_ID}.metered.live/${roomName}`;
 
@@ -90,13 +86,23 @@
             roomInput.style.display = "none";
             hangupBtn.style.display = "inline-block";
 
-            // Ingest any existing peers who were already streaming inside the room
-            const existingTracks = await meeting.getRemoteTracks();
-            existingTracks.forEach(trackItem => {
-                handleIncomingAudioTrack(trackItem);
+            // FIX 1: Safely read the native property array for early joiners
+            if (meeting.remoteTracks && Array.isArray(meeting.remoteTracks)) {
+                meeting.remoteTracks.forEach(trackItem => {
+                    handleIncomingAudioTrack(trackItem);
+                });
+            }
+
+            // FIX 2: Force microphone stream re-broadcast when another device enters
+            meeting.on("participantJoined", async (participant) => {
+                statusDiv.innerText = "Status: Peer detected! Exchanging streams...";
+                try {
+                    await meeting.stopAudio();
+                    await meeting.startAudio();
+                } catch(e) { console.log("Re-sync trace:", e); }
             });
 
-            // Catch any late joiners who start streaming afterward
+            // Dynamic stream handler for late entries
             meeting.on("remoteTrackStarted", (trackItem) => {
                 handleIncomingAudioTrack(trackItem);
             });
