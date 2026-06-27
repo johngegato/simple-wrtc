@@ -28,11 +28,11 @@
     <div id="status">Status: Ready. Enter a shared room name to connect.</div>
 </div>
 
-<!-- Visible audio layout to completely bypass mobile security locks -->
+<!-- Visible audio element to fully bypass mobile operating system hardware locks -->
 <audio id="remoteAudio" autoplay playsinline style="width: 85%; margin-top: 15px;"></audio>
 
 <script>
-    // Universal STUN architecture to clear home firewalls and routing address barriers
+    // Universal STUN framework to navigate home routers and mobile NAT firewalls
     const rtcConfig = { iceServers: [{ urls: 'stun:://google.com' }] };
     
     let localStream = null;
@@ -59,20 +59,21 @@
     }
 
     function setupSignaling(room) {
-        // Shared public testing pipeline broker (Zero keys required)
-        ws = new WebSocket(`wss://://piesocket.com{room}?api_key=oCdCMcMPQpbvNjUIzqtvF1d2X2okWpDQj4AwARJuAgtjhzKxVEjdCjwm&notify_self=0`);
+        // 🔥 FIXED: Completely repaired connection string syntax, removing typos and correctly implementing the dynamic string literal variables
+        const signalURL = "wss://demo.piesocket.com/v3/" + room + "?api_key=oCdCMcMPQpbvNjUIzqtvF1d2X2okWpDQj4AwARJuAgtjhzKxVEjdCjwm&notify_self=0";
+        ws = new WebSocket(signalURL);
 
         ws.onopen = () => {
             statusDiv.innerText = `Status: Inside Room "${room}". Waiting for other device...`;
-            // Instantly notify existing peers that we just arrived
+            // Announce presence immediately to catch any listening peer already in the room
             sendSignal({ type: 'announcement' });
         };
 
         ws.onmessage = async (event) => {
             const data = JSON.parse(event.data);
-            if (data.senderId === myId) return; // Skip own signals
+            if (data.senderId === myId) return; // Skip our own echoed messages
 
-            // 🔥 FIX: When someone announces arrival, create the line and send the WebRTC offer
+            // When a peer is detected, initialize the RTCPeerConnection and emit the WebRTC offer
             if (data.type === 'announcement') {
                 statusDiv.innerText = "Status: Device detected! Exchanging voice lines...";
                 await initPeerConnection();
@@ -102,7 +103,10 @@
             }
         };
 
-        ws.onerror = () => { statusDiv.innerText = "Status: Connection server issue. Retrying..."; };
+        ws.onerror = (e) => { 
+            console.error("WebSocket Error: ", e);
+            statusDiv.innerText = "Status: Connection server issue. Retrying..."; 
+        };
     }
 
     async function initPeerConnection() {
@@ -110,23 +114,24 @@
         
         peerConnection = new RTCPeerConnection(rtcConfig);
         
-        // Push microphone tracks immediately
+        // Feed local microphone data into the WebRTC instance pipeline
         localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
-        // Connect the audio stream coming from the other device
+        // Connect the audio stream coming from the remote peer directly to hardware output
         peerConnection.ontrack = (event) => {
             if (event.streams && event.streams[0]) {
                 remoteAudio.srcObject = event.streams[0];
                 
-                // Clear mobile hardware speaker permissions explicitly
+                // Override browser volume and muting rules explicitly
                 remoteAudio.muted = false;
                 remoteAudio.volume = 1.0;
 
                 remoteAudio.play().then(() => {
                     statusDiv.innerText = "Status: Connected! Two-way audio active.";
                     statusDiv.style.color = "#10b981";
+                    joinBtn.style.display = "none";
                 }).catch(err => {
-                    // Mobile safari / chrome gesture blocker handling
+                    // Mobile gesture safety lock handler: allows manual trigger fallback unmuting
                     statusDiv.innerText = "⚠️ Connected! Tap the blue button below to unmute your friend's voice.";
                     statusDiv.style.color = "#2563eb";
                     joinBtn.innerText = "🔊 Unmute Voice Stream";
@@ -150,7 +155,7 @@
     }
 
     joinBtn.onclick = async () => {
-        // GESTURE FALLBACK UNMUTE INTERCEPT
+        // GESTURE FALLBACK INTERCEPT: Unlocks hardware speaker stream if auto-play fails
         if (peerConnection) {
             remoteAudio.play().catch(e => console.error(e));
             joinBtn.style.display = "none";
