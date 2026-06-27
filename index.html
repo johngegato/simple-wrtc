@@ -12,9 +12,12 @@
         .unmute-pulse { background: #2563eb; color: white; animation: pulse 1.8s infinite; }
         .hangup { background: #ef4444; color: white; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; line-height: 1.4; }
+        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; line-height: 1.4; min-height: 40px; }
         input { padding: 10px; width: 80%; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; text-align: center; }
+        .audio-indicator { display: inline-block; width: 10px; height: 10px; background: #10b981; border-radius: 50%; margin-left: 8px; animation: none; }
+        .audio-indicator.active { animation: audioLevel 0.3s ease-out; }
         @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.03); } 100% { transform: scale(1); } }
+        @keyframes audioLevel { 0% { transform: scale(1.5); opacity: 1; } 100% { transform: scale(1); opacity: 0.6; } }
     </style>
 </head>
 <body>
@@ -32,14 +35,31 @@
 <audio id="remoteAudio" autoplay playsinline style="width: 85%; margin-top: 15px;"></audio>
 
 <script>
-    // Universal STUN framework to navigate home routers and mobile NAT firewalls
-    const rtcConfig = { iceServers: [{ urls: 'stun:://google.com' }] };
+    // ============= CONFIGURATION =============
+    // Universal STUN servers to navigate home routers and mobile NAT firewalls
+    const rtcConfig = { 
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' }
+        ] 
+    };
     
+    const SIGNALING_SERVER = "wss://demo.piesocket.com/v3/";
+    const API_KEY = "oCdCMcMPQpbvNjUIzqtvF1d2X2okWpDQj4AwARJuAgtjhzKxVEjdCjwm";
+    const RECONNECT_TIMEOUT = 5000; // 5 seconds
+    const CONNECTION_TIMEOUT = 15000; // 15 seconds
+    
+    // ============= STATE VARIABLES =============
     let localStream = null;
     let peerConnection = null;
     let ws = null;
     let myId = Math.random().toString(36).substring(7);
     let roomName = "";
+    let reconnectAttempts = 0;
+    let maxReconnectAttempts = 3;
+    let connectionTimeoutId = null;
+    let isConnecting = false;
 
     const roomInput = document.getElementById('roomInput');
     const joinBtn = document.getElementById('joinBtn');
@@ -47,68 +67,121 @@
     const statusDiv = document.getElementById('status');
     const remoteAudio = document.getElementById('remoteAudio');
 
+    // ============= MICROPHONE SETUP =============
     async function startMicrophone() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             throw new Error("SECURE_CONTEXT_REQUIRED: Open via HTTPS to authorize media hardware.");
         }
         try {
-            localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            localStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }, 
+                video: false 
+            });
         } catch (err) {
             throw new Error("MIC_DENIED: Please toggle your address bar settings to permit microphone access.");
         }
     }
 
+    // ============= WEBSOCKET SIGNALING =============
     function setupSignaling(room) {
-        // 🔥 FIXED: Completely repaired connection string syntax, removing typos and correctly implementing the dynamic string literal variables
-        const signalURL = "wss://demo.piesocket.com/v3/" + room + "?api_key=oCdCMcMPQpbvNjUIzqtvF1d2X2okWpDQj4AwARJuAgtjhzKxVEjdCjwm&notify_self=0";
-        ws = new WebSocket(signalURL);
+        // Build connection string using template literal for clarity
+        const signalURL = `${SIGNALING_SERVER}${room}?api_key=${API_KEY}&notify_self=0`;
+        
+        try {
+            ws = new WebSocket(signalURL);
+        } catch (e) {
+            updateStatus("Failed to create WebSocket connection", "error");
+            return;
+        }
 
         ws.onopen = () => {
-            statusDiv.innerText = `Status: Inside Room "${room}". Waiting for other device...`;
+            reconnectAttempts = 0;
+            isConnecting = false;
+            updateStatus(`Inside Room "${room}". Waiting for other device...`, "info");
             // Announce presence immediately to catch any listening peer already in the room
             sendSignal({ type: 'announcement' });
+            
+            // Set connection timeout
+            clearTimeout(connectionTimeoutId);
+            connectionTimeoutId = setTimeout(() => {
+                if (peerConnection && peerConnection.connectionState !== 'connected') {
+                    updateStatus("Connection timeout. No peer found in room.", "error");
+                }
+            }, CONNECTION_TIMEOUT);
         };
 
         ws.onmessage = async (event) => {
-            const data = JSON.parse(event.data);
-            if (data.senderId === myId) return; // Skip our own echoed messages
+            try {
+                const data = JSON.parse(event.data);
+                if (data.senderId === myId) return; // Skip our own echoed messages
 
-            // When a peer is detected, initialize the RTCPeerConnection and emit the WebRTC offer
-            if (data.type === 'announcement') {
-                statusDiv.innerText = "Status: Device detected! Exchanging voice lines...";
-                await initPeerConnection();
-                const offer = await peerConnection.createOffer();
-                await peerConnection.setLocalDescription(offer);
-                sendSignal({ sdp: peerConnection.localDescription });
-            } 
-            else if (data.sdp) {
-                if (!peerConnection) await initPeerConnection();
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
-                
-                if (data.sdp.type === 'offer') {
-                    const answer = await peerConnection.createAnswer();
-                    await peerConnection.setLocalDescription(answer);
+                // When a peer is detected, initialize the RTCPeerConnection and emit the WebRTC offer
+                if (data.type === 'announcement') {
+                    clearTimeout(connectionTimeoutId);
+                    updateStatus("Device detected! Exchanging voice lines...", "info");
+                    await initPeerConnection();
+                    const offer = await peerConnection.createOffer();
+                    await peerConnection.setLocalDescription(offer);
                     sendSignal({ sdp: peerConnection.localDescription });
+                } 
+                else if (data.sdp) {
+                    if (!peerConnection) await initPeerConnection();
+                    // Don't wrap in RTCSessionDescription - use plain object
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                    
+                    if (data.sdp.type === 'offer') {
+                        const answer = await peerConnection.createAnswer();
+                        await peerConnection.setLocalDescription(answer);
+                        sendSignal({ sdp: peerConnection.localDescription });
+                    }
+                } 
+                else if (data.candidate) {
+                    // Only add ICE candidate if remote description is set
+                    if (peerConnection && peerConnection.remoteDescription) {
+                        try {
+                            await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                        } catch (e) { 
+                            console.error("ICE candidate error:", e);
+                        }
+                    }
                 }
-            } 
-            else if (data.candidate) {
-                if (peerConnection) {
-                    try {
-                        await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-                    } catch (e) { console.error(e); }
+                else if (data.type === 'exit') {
+                    handleRemoteDisconnect();
                 }
-            }
-            else if (data.type === 'exit') {
-                handleRemoteDisconnect();
+            } catch (e) {
+                console.error("Error processing signaling message:", e);
             }
         };
 
         ws.onerror = (e) => { 
-            console.error("WebSocket Error: ", e);
-            statusDiv.innerText = "Status: Connection server issue. Retrying..."; 
+            console.error("WebSocket Error:", e);
+            updateStatus("Connection server issue. Retrying...", "error");
+        };
+
+        ws.onclose = () => {
+            handleWebSocketClose();
         };
     }
 
+    function handleWebSocketClose() {
+        if (!isConnecting || reconnectAttempts < maxReconnectAttempts) {
+            reconnectAttempts++;
+            updateStatus(`Connection lost. Reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...`, "error");
+            setTimeout(() => {
+                if (roomName && peerConnection) {
+                    setupSignaling(roomName);
+                }
+            }, RECONNECT_TIMEOUT);
+        } else {
+            updateStatus("Unable to reconnect to signaling server.", "error");
+        }
+    }
+
+    // ============= PEER CONNECTION SETUP =============
     async function initPeerConnection() {
         if (peerConnection) return;
         
@@ -116,6 +189,16 @@
         
         // Feed local microphone data into the WebRTC instance pipeline
         localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+        // Monitor connection state
+        peerConnection.onconnectionstatechange = () => {
+            console.log("Connection state:", peerConnection.connectionState);
+            if (peerConnection.connectionState === 'failed') {
+                updateStatus("Connection failed. Attempting to reconnect...", "error");
+            } else if (peerConnection.connectionState === 'disconnected') {
+                updateStatus("Connection disconnected.", "error");
+            }
+        };
 
         // Connect the audio stream coming from the remote peer directly to hardware output
         peerConnection.ontrack = (event) => {
@@ -127,13 +210,11 @@
                 remoteAudio.volume = 1.0;
 
                 remoteAudio.play().then(() => {
-                    statusDiv.innerText = "Status: Connected! Two-way audio active.";
-                    statusDiv.style.color = "#10b981";
+                    updateStatus("Connected! Two-way audio active.", "success");
                     joinBtn.style.display = "none";
                 }).catch(err => {
                     // Mobile gesture safety lock handler: allows manual trigger fallback unmuting
-                    statusDiv.innerText = "⚠️ Connected! Tap the blue button below to unmute your friend's voice.";
-                    statusDiv.style.color = "#2563eb";
+                    updateStatus("⚠️ Connected! Tap the blue button below to unmute your friend's voice.", "warning");
                     joinBtn.innerText = "🔊 Unmute Voice Stream";
                     joinBtn.className = "start unmute-pulse";
                     joinBtn.style.display = "inline-block";
@@ -145,29 +226,58 @@
         peerConnection.onicecandidate = (event) => {
             if (event.candidate) sendSignal({ candidate: event.candidate });
         };
+
+        // Monitor ICE connection state
+        peerConnection.oniceconnectionstatechange = () => {
+            console.log("ICE connection state:", peerConnection.iceConnectionState);
+        };
     }
 
+    // ============= SIGNALING HELPERS =============
     function sendSignal(msg) {
         if (ws && ws.readyState === WebSocket.OPEN) {
             msg.senderId = myId;
             ws.send(JSON.stringify(msg));
+        } else {
+            console.warn("WebSocket not ready for sending signal");
         }
     }
 
+    function updateStatus(message, type = "info") {
+        statusDiv.innerText = `Status: ${message}`;
+        
+        switch(type) {
+            case "success":
+                statusDiv.style.color = "#10b981";
+                break;
+            case "error":
+                statusDiv.style.color = "#ef4444";
+                break;
+            case "warning":
+                statusDiv.style.color = "#2563eb";
+                break;
+            default:
+                statusDiv.style.color = "#555";
+        }
+    }
+
+    // ============= UI EVENT HANDLERS =============
     joinBtn.onclick = async () => {
         // GESTURE FALLBACK INTERCEPT: Unlocks hardware speaker stream if auto-play fails
         if (peerConnection) {
             remoteAudio.play().catch(e => console.error(e));
             joinBtn.style.display = "none";
-            statusDiv.innerText = "Status: Connected! Two-way audio active.";
-            statusDiv.style.color = "#10b981";
+            updateStatus("Connected! Two-way audio active.", "success");
             return;
         }
 
         roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!roomName) return alert("Please type a room name.");
 
-        statusDiv.innerText = "Status: Activating microphone...";
+        if (isConnecting) return; // Prevent multiple simultaneous connection attempts
+        isConnecting = true;
+
+        updateStatus("Activating microphone...", "info");
         joinBtn.disabled = true;
 
         try {
@@ -179,36 +289,67 @@
             hangupBtn.style.display = "inline-block";
         } catch (e) {
             joinBtn.disabled = false;
-            statusDiv.innerText = `${e.message}`;
-            statusDiv.style.color = "#ef4444";
+            isConnecting = false;
+            updateStatus(e.message, "error");
         }
     };
 
     function resetApp() {
-        if (localStream) localStream.getTracks().forEach(track => track.stop());
-        if (peerConnection) { peerConnection.close(); peerConnection = null; }
-        if (ws) { ws.close(); ws = null; }
-        remoteAudio.srcObject = null;
-        localStream = null;
+        // Stop audio playback and cleanup
+        if (remoteAudio) {
+            remoteAudio.pause();
+            remoteAudio.srcObject = null;
+        }
+
+        // Stop local tracks
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+            localStream = null;
+        }
+
+        // Close peer connection
+        if (peerConnection) { 
+            peerConnection.close(); 
+            peerConnection = null; 
+        }
+
+        // Close WebSocket
+        if (ws) { 
+            ws.close(); 
+            ws = null; 
+        }
+
+        // Clear timeouts
+        clearTimeout(connectionTimeoutId);
+
+        // Reset UI
         joinBtn.innerText = "📞 Connect Call";
         joinBtn.className = "start";
         joinBtn.style.display = "inline-block";
         roomInput.style.display = "inline-block";
         hangupBtn.style.display = "none";
         joinBtn.disabled = false;
-        statusDiv.style.color = "#555";
+        updateStatus("Ready. Enter a shared room name to connect.", "info");
+        
+        isConnecting = false;
+        reconnectAttempts = 0;
     }
 
     hangupBtn.onclick = () => {
         sendSignal({ type: 'exit' });
         resetApp();
-        statusDiv.innerText = "Status: Call ended.";
     };
 
     function handleRemoteDisconnect() {
         resetApp();
-        statusDiv.innerText = "Status: The other device disconnected.";
+        updateStatus("The other device disconnected.", "info");
     }
+
+    // ============= CLEANUP ON PAGE UNLOAD =============
+    window.addEventListener('beforeunload', () => {
+        sendSignal({ type: 'exit' });
+        resetApp();
+    });
 </script>
 </body>
 </html>
