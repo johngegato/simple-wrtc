@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Symmetric Serverless Audio Call</title>
     <!-- Metered Production WebRTC SDK -->
-    <script src="https://Metered.ca"></script>
+    <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
         .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
@@ -25,15 +25,14 @@
     <br>
     <button id="joinBtn" class="start">📞 Join Call</button>
     <button id="hangupBtn" class="hangup" style="display:none;">🛑 Leave Call</button>
-    <div id="status">Status: Ready. Make sure the room exists in Metered dashboard.</div>
+    <div id="status">Status: Checking SDK configuration...</div>
 </div>
 
-<!-- Essential hidden audio node -->
 <audio id="remoteAudio" autoplay controls style="display:none;"></audio>
 
 <script>
-    // ⚠️ REPLACE WITH YOUR ACTUAL PREFIX
-    const METERED_APP_ID = "myaudioapp"; 
+    // ⚠️ REPLACE WITH YOUR ACTUAL METERED PREFIX
+    const METERED_APP_ID = "YOUR_METERED_APP_ID"; 
 
     let meeting = null;
     const roomInput = document.getElementById('roomInput');
@@ -42,17 +41,31 @@
     const statusDiv = document.getElementById('status');
     const remoteAudio = document.getElementById('remoteAudio');
 
+    // Run a health check on script load
+    window.onload = () => {
+        if (typeof Metered === 'undefined') {
+            statusDiv.innerText = "Error: Metered SDK blocked by browser security. Ensure you are loading via HTTPS on Vercel.";
+            statusDiv.style.color = "#ef4444";
+        } else {
+            statusDiv.innerText = "Status: SDK ready. Make sure room exists in your dashboard.";
+        }
+    };
+
     function handleIncomingAudioTrack(trackItem) {
         if (trackItem.type === "audio") {
             statusDiv.innerText = "Status: Connected! Streaming peer voice.";
             const remoteStream = new MediaStream([trackItem.track]);
             remoteAudio.srcObject = remoteStream;
-            // Force play fallback for safari and mobile devices
-            remoteAudio.play().catch(e => console.log("Autoplay gesture catch:", e));
+            remoteAudio.play().catch(e => console.log("Playback interaction catch:", e));
         }
     }
 
     joinBtn.onclick = async () => {
+        if (typeof Metered === 'undefined') {
+            alert("The Metered SDK failed to load. You must use an HTTPS (Vercel) link to test WebRTC applications.");
+            return;
+        }
+
         const roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!roomName) return alert("Please enter a room name");
 
@@ -60,7 +73,8 @@
         joinBtn.disabled = true;
 
         try {
-            meeting = new Metered.Meeting();
+            // Explicit safely wrapped global instantiation
+            meeting = new window.Metered.Meeting();
             const targetRoomURL = `${METERED_APP_ID}.metered.live/${roomName}`;
 
             await meeting.join({
@@ -76,13 +90,13 @@
             roomInput.style.display = "none";
             hangupBtn.style.display = "inline-block";
 
-            // FIX part 1: Instantly ingest any peers already streaming in the room
+            // Ingest any existing peers who were already streaming inside the room
             const existingTracks = await meeting.getRemoteTracks();
             existingTracks.forEach(trackItem => {
                 handleIncomingAudioTrack(trackItem);
             });
 
-            // FIX part 2: Listen dynamically for anyone who starts streaming later
+            // Catch any late joiners who start streaming afterward
             meeting.on("remoteTrackStarted", (trackItem) => {
                 handleIncomingAudioTrack(trackItem);
             });
@@ -93,8 +107,8 @@
             });
 
         } catch (error) {
-            console.error("WebRTC Error:", error);
-            statusDiv.innerText = `Error: ${error.message || "Failed to link."}`;
+            console.error("WebRTC Error Context:", error);
+            statusDiv.innerText = `Error: ${error.message || "Failed to establish link."}`;
             joinBtn.disabled = false;
         }
     };
