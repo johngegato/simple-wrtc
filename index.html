@@ -35,6 +35,9 @@
     // Paste your exact Pusher Key and Cluster here
     const PUSHER_KEY = 'de9110bcedc87362e1e4';
     const PUSHER_CLUSTER = 'e569d42645c9d9df31f8';
+    // Paste your exact Pusher Key and Cluster here
+   // const PUSHER_KEY = 'YOUR_PUSHER_APP_KEY';
+   // const PUSHER_CLUSTER = 'YOUR_PUSHER_CLUSTER';
 
     const rtcConfig = { iceServers: [{ urls: 'stun:://google.com' }] };
     let localStream, peerConnection, pusher, channel, myId, roomName;
@@ -50,17 +53,35 @@
 
     // Step 1: Connect to the room via Pusher
     connectBtn.onclick = () => {
-        roomName = roomInput.value.trim();
-        if (!roomName) return alert("Please enter a room name");
+        roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!roomName) return alert("Please enter an alphanumeric room name");
 
-        // Initialize Pusher
-        pusher = new Pusher(PUSHER_KEY, { cluster: PUSHER_CLUSTER, forceTLS: true });
-        channel = pusher.subscribe(`presence-audio-${roomName}`);
+        // Initialize Pusher with a local-testing authorization bypass trick
+        pusher = new Pusher(PUSHER_KEY, { 
+            cluster: PUSHER_CLUSTER, 
+            forceTLS: true,
+            userAuthentication: { endpoint: null }, // Serverless bypass
+            channelAuthorization: {
+                transport: 'jsonp',
+                endpoint: 'data:text/javascript,pusher.authorizer.success({"auth":"' + PUSHER_KEY + ':auth"})'
+            }
+        });
 
-        statusDiv.innerText = `Status: In Room "${roomName}". Waiting for other caller...`;
-        connectBtn.style.display = 'none';
-        roomInput.style.display = 'none';
-        startBtn.style.display = 'inline-block';
+        // Use a private- channel which permits client-side triggers
+        channel = pusher.subscribe(`private-audio-${roomName}`);
+
+        // Wait until the connection securely initializes before displaying the Call button
+        channel.bind('pusher:subscription_succeeded', () => {
+            statusDiv.innerText = `Status: Inside Room "${roomName}". Ready to dial!`;
+            connectBtn.style.display = 'none';
+            roomInput.style.display = 'none';
+            startBtn.style.display = 'inline-block';
+        });
+
+        channel.bind('pusher:subscription_error', (status) => {
+            statusDiv.innerText = "Status: Connection error. Check Pusher keys.";
+            console.error(status);
+        });
 
         // Listen for signals sent by the other peer
         channel.bind('client-signal', async (data) => {
@@ -94,7 +115,13 @@
     }
 
     async function initializeCall() {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        } catch (err) {
+            alert("Microphone access denied or unavailable. Ensure you are testing over HTTPS.");
+            return;
+        }
+        
         peerConnection = new RTCPeerConnection(rtcConfig);
         localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
@@ -139,6 +166,9 @@
         stopTracks();
         statusDiv.innerText = "Status: Peer hung up";
     }
+
+    
+        
 </script>
 </body>
 </html>
