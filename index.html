@@ -11,7 +11,7 @@
         .start { background: #10b981; color: white; }
         .hangup { background: #ef4444; color: white; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; }
+        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; line-height: 1.4; }
         input { padding: 10px; width: 80%; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; text-align: center; }
     </style>
 </head>
@@ -29,7 +29,6 @@
 <audio id="remoteAudio" autoplay></audio>
 
 <script>
-    // Configuration using public Google servers to tunnel through home routers and mobile firewalls
     const rtcConfig = { iceServers: [{ urls: 'stun:://google.com' }] };
     
     let localStream = null;
@@ -45,32 +44,43 @@
     const remoteAudio = document.getElementById('remoteAudio');
 
     async function startMedia() {
-        if (!localStream) {
-            try {
-                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-            } catch (err) {
-                alert("Microphone permission required! Please grant access and try again.");
-                throw err;
+        // Explicitly guard against non-secure HTTP contexts
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("SECURE_CONTEXT_REQUIRED: Browser blocked media APIs. You MUST use a secure URL (https://) to host and test WebRTC calls.");
+        }
+
+        try {
+            // Native fallback constraint definitions
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        } catch (err) {
+            // Parse system logs explicitly for diagnostic visibility
+            if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                throw new Error("MIC_DENIED: User or system privacy layout explicitly blocked microphone authorization.");
+            } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+                throw new Error("NO_HARDWARE: No physical audio capture equipment or functional microphone was found.");
+            } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+                throw new Error("HARDWARE_LOCKED: Your device microphone is locked by another open program (e.g., Zoom, Teams, Discord).");
+            } else {
+                throw new Error(`SYSTEM_ERROR: ${err.name} -> ${err.message}`);
             }
         }
     }
 
     function setupSignaling(room) {
-        // Connects to a reliable, open global public signaling broker cluster
         ws = new WebSocket(`wss://://piesocket.com{room}?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e6XIv987654321&notify_self=0`);
 
         ws.onopen = () => {
             statusDiv.innerText = `Status: Connected to Room "${room}". Waiting for other device...`;
-            // Announce presence to the other device
+            statusDiv.style.color = "#555";
             sendMessage({ type: 'join' });
         };
 
         ws.onmessage = async (event) => {
             const data = JSON.parse(event.data);
-            if (data.senderId === myId) return; // Ignore self
+            if (data.senderId === myId) return;
 
             if (data.type === 'join') {
-                statusDiv.innerText = "Status: Peer detected! Calling...";
+                statusDiv.innerText = "Status: Peer detected! Exchanging voice streams...";
                 await createPeerConnection();
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
@@ -99,7 +109,7 @@
         };
 
         ws.onerror = () => {
-            statusDiv.innerText = "Status: Signaling error. Retrying...";
+            statusDiv.innerText = "Status: Connection server temporarily resetting. Please wait...";
         };
     }
 
@@ -107,19 +117,16 @@
         if (peerConnection) return;
         
         peerConnection = new RTCPeerConnection(rtcConfig);
-        
-        // Add our microphone tracks
         localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
-        // Connect the incoming sound stream to our hardware
         peerConnection.ontrack = (event) => {
             if (event.streams && event.streams[0]) {
                 remoteAudio.srcObject = event.streams[0];
-                statusDiv.innerText = "Status: Call Connected! Two-way audio active.";
+                statusDiv.innerText = "Status: Call Connected! Two-way audio is now fully active.";
+                statusDiv.style.color = "#10b981";
             }
         };
 
-        // Broadcast network route candidates to the other device
         peerConnection.onicecandidate = (event) => {
             if (event.candidate) {
                 sendMessage({ candidate: event.candidate });
@@ -138,7 +145,8 @@
         roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!roomName) return alert("Please enter a room name.");
 
-        statusDiv.innerText = "Status: Activating microphone...";
+        statusDiv.innerText = "Status: Accessing hardware stream...";
+        statusDiv.style.color = "#555";
         joinBtn.disabled = true;
 
         try {
@@ -150,7 +158,8 @@
             hangupBtn.style.display = "inline-block";
         } catch (e) {
             joinBtn.disabled = false;
-            statusDiv.innerText = "Status: Audio activation failed.";
+            statusDiv.innerText = `${e.message}`;
+            statusDiv.style.color = "#ef4444";
         }
     };
 
@@ -170,11 +179,13 @@
         sendMessage({ type: 'leave' });
         cleanUp();
         statusDiv.innerText = "Status: Call ended.";
+        statusDiv.style.color = "#555";
     };
 
     function handleRemoteHangup() {
         cleanUp();
-        statusDiv.innerText = "Status: Friend hung up.";
+        statusDiv.innerText = "Status: Remote device left the channel.";
+        statusDiv.style.color = "#555";
     }
 </script>
 </body>
