@@ -3,18 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fixed Serverless Audio Call</title>
-    <!-- Corrected production-ready Metered Core SDK CDN -->
-    <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
+    <title>Fixed Two-Way Serverless Audio Call</title>
+    <!-- Production-ready Metered Core SDK CDN -->
+    <script src="https://metered.ca"></script>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
         .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
-        button { font-size: 16px; padding: 12px 24px; margin: 10px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        button { font-size: 16px; padding: 12px 24px; margin: 10px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; width: 85%; }
         .start { background: #10b981; color: white; }
+        .action-needed { background: #3b82f6; color: white; animation: pulse 2s infinite; }
         .hangup { background: #ef4444; color: white; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; }
+        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; line-height: 1.4; }
         input { padding: 10px; width: 80%; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; text-align: center; }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.03); } 100% { transform: scale(1); } }
     </style>
 </head>
 <body>
@@ -28,8 +30,8 @@
     <div id="status">Status: Ready. Make sure the room exists in Metered dashboard.</div>
 </div>
 
-<!-- Audio element for hardware routing -->
-<audio id="remoteAudio" autoplay></audio>
+<!-- Visible audio layout to bypass mobile core operating system blockers -->
+<audio id="remoteAudio" autoplay playsinline style="width: 85%; margin-top: 15px;"></audio>
 
 <script>
     // ⚠️ REPLACE WITH YOUR EXACT PREFIX FROM METERED (e.g., "mytestapp")
@@ -42,18 +44,46 @@
     const statusDiv = document.getElementById('status');
     const remoteAudio = document.getElementById('remoteAudio');
 
-    // Helper function to process and attach an audio track
+    // Robust handler targeting operating system audio channels directly
     function handleIncomingAudioTrack(trackItem) {
         if (trackItem && trackItem.type === "audio" && trackItem.track) {
-            statusDiv.innerText = "Status: Connected! Streaming peer voice.";
+            console.log("Processing incoming audio track...", trackItem);
             const remoteStream = new MediaStream([trackItem.track]);
             remoteAudio.srcObject = remoteStream;
-            // Safari/Chrome autoplay safety override
-            remoteAudio.play().catch(e => console.log("Autoplay catch:", e));
+            
+            // Unmute HTML element explicitly
+            remoteAudio.muted = false;
+            remoteAudio.volume = 1.0;
+
+            // Trigger fallback gesture update if system blocks standard autoplay
+            remoteAudio.play().then(() => {
+                statusDiv.innerText = "Status: Connected! Two-way voice streaming active.";
+                statusDiv.style.color = "#10b981";
+            }).catch(e => {
+                console.warn("Autoplay blocked by mobile OS policy.", e);
+                statusDiv.innerText = "⚠️ Peer connected! Tap the blue button to unmute the voice stream.";
+                statusDiv.style.color = "#3b82f6";
+                
+                // Morph button into a gesture activation link
+                joinBtn.innerText = "🔊 Activate & Unmute Audio";
+                joinBtn.className = "start action-needed";
+                joinBtn.style.display = "inline-block";
+                joinBtn.disabled = false;
+            });
         }
     }
 
     joinBtn.onclick = async () => {
+        // GESTURE FALLBACK INTERCEPT: If call is live but audio is blocked, use click to unlock hardware sound
+        if (meeting && meeting.roomInfo) {
+            remoteAudio.play().catch(e => console.error(e));
+            if (meeting.remoteTracks) {
+                meeting.remoteTracks.forEach(handleIncomingAudioTrack);
+            }
+            joinBtn.style.display = "none";
+            return;
+        }
+
         const roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!roomName) return alert("Please enter a room name");
 
@@ -62,36 +92,42 @@
 
         try {
             meeting = new Metered.Meeting();
-            
             const targetRoomURL = `${METERED_APP_ID}.metered.live/${roomName}`;
-            statusDiv.innerText = `Status: Accessing room url: ${targetRoomURL}`;
 
-            // Join the WebRTC session room
             await meeting.join({
                 roomURL: targetRoomURL,
                 name: "User-" + Math.floor(Math.random() * 100)
             });
 
             statusDiv.innerText = "Status: Room joined! Activating microphone...";
-
-            // Fire up microphone capture
+            
+            // Force microphone publication out to the cloud signaling pipeline
             await meeting.startAudio();
             
-            statusDiv.innerText = `Status: Live in "${roomName}". Synchronizing audio streams...`;
+            statusDiv.innerText = `Status: Live in "${roomName}". Connecting audio lines...`;
             joinBtn.style.display = "none";
             roomInput.style.display = "none";
             hangupBtn.style.display = "inline-block";
 
-            // 🔥 FIX: Instantly catch audio if the other peer is already inside the room streaming
+            // Process peers already inside the channel
             if (meeting.remoteTracks && Array.isArray(meeting.remoteTracks)) {
                 meeting.remoteTracks.forEach(trackItem => {
                     handleIncomingAudioTrack(trackItem);
                 });
             }
 
-            // Listen for any peers who start streaming *after* you have already joined
+            // Bind live track events for late arrivals
             meeting.on("remoteTrackStarted", (trackItem) => {
                 handleIncomingAudioTrack(trackItem);
+            });
+
+            // Handle forced re-sync notification events when another peer hits the channel
+            meeting.on("participantJoined", async () => {
+                console.log("Peer joined, pushing local audio channel...");
+                try {
+                    await meeting.stopAudio();
+                    await meeting.startAudio();
+                } catch(err) { console.error(err); }
             });
 
             meeting.on("remoteTrackStopped", (trackItem) => {
@@ -110,9 +146,12 @@
         if (meeting) {
             await meeting.stopAudio();
             await meeting.leaveMeeting();
+            meeting = null;
         }
         remoteAudio.srcObject = null;
         statusDiv.innerText = "Status: Call disconnected.";
+        joinBtn.innerText = "📞 Join Call";
+        joinBtn.className = "start";
         joinBtn.style.display = "inline-block";
         roomInput.style.display = "inline-block";
         hangupBtn.style.display = "none";
