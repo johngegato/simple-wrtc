@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fixed Serverless Audio Call</title>
-    <!-- Corrected production-ready Metered Core SDK CDN -->
-    <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
+    <title>Symmetric Serverless Audio Call</title>
+    <!-- Metered Production WebRTC SDK -->
+    <script src="https://metered.ca"></script>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
         .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
@@ -21,18 +21,18 @@
 
 <div class="card">
     <h2>Secure Voice Link</h2>
-    <input type="text" id="roomInput" placeholder="Enter Room (e.g., talk123)" value="talk123">
+    <input type="text" id="roomInput" placeholder="Enter Room" value="talk123">
     <br>
     <button id="joinBtn" class="start">📞 Join Call</button>
     <button id="hangupBtn" class="hangup" style="display:none;">🛑 Leave Call</button>
     <div id="status">Status: Ready. Make sure the room exists in Metered dashboard.</div>
 </div>
 
-<!-- Audio element for hardware routing -->
-<audio id="remoteAudio" autoplay></audio>
+<!-- Essential hidden audio node -->
+<audio id="remoteAudio" autoplay controls style="display:none;"></audio>
 
 <script>
-    // ⚠️ REPLACE WITH YOUR EXACT PREFIX FROM METERED (e.g., "mytestapp")
+    // ⚠️ REPLACE WITH YOUR ACTUAL PREFIX
     const METERED_APP_ID = "myaudioapp"; 
 
     let meeting = null;
@@ -42,6 +42,16 @@
     const statusDiv = document.getElementById('status');
     const remoteAudio = document.getElementById('remoteAudio');
 
+    function handleIncomingAudioTrack(trackItem) {
+        if (trackItem.type === "audio") {
+            statusDiv.innerText = "Status: Connected! Streaming peer voice.";
+            const remoteStream = new MediaStream([trackItem.track]);
+            remoteAudio.srcObject = remoteStream;
+            // Force play fallback for safari and mobile devices
+            remoteAudio.play().catch(e => console.log("Autoplay gesture catch:", e));
+        }
+    }
+
     joinBtn.onclick = async () => {
         const roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!roomName) return alert("Please enter a room name");
@@ -50,35 +60,31 @@
         joinBtn.disabled = true;
 
         try {
-            // Capital "M" to properly invoke the active global class
             meeting = new Metered.Meeting();
-            
             const targetRoomURL = `${METERED_APP_ID}.metered.live/${roomName}`;
-            statusDiv.innerText = `Status: Accessing room url: ${targetRoomURL}`;
 
-            // Join the WebRTC session room
             await meeting.join({
                 roomURL: targetRoomURL,
                 name: "User-" + Math.floor(Math.random() * 100)
             });
 
             statusDiv.innerText = "Status: Room joined! Activating microphone...";
-
-            // Fire up microphone capture
             await meeting.startAudio();
             
-            statusDiv.innerText = `Status: Live in "${roomName}". Waiting for peer audio...`;
+            statusDiv.innerText = `Status: Live in "${roomName}". Searching for peers...`;
             joinBtn.style.display = "none";
             roomInput.style.display = "none";
             hangupBtn.style.display = "inline-block";
 
-            // Track listener for peer audio streams
+            // FIX part 1: Instantly ingest any peers already streaming in the room
+            const existingTracks = await meeting.getRemoteTracks();
+            existingTracks.forEach(trackItem => {
+                handleIncomingAudioTrack(trackItem);
+            });
+
+            // FIX part 2: Listen dynamically for anyone who starts streaming later
             meeting.on("remoteTrackStarted", (trackItem) => {
-                if (trackItem.type === "audio") {
-                    statusDiv.innerText = "Status: Connected! Streaming peer voice.";
-                    const remoteStream = new MediaStream([trackItem.track]);
-                    remoteAudio.srcObject = remoteStream;
-                }
+                handleIncomingAudioTrack(trackItem);
             });
 
             meeting.on("remoteTrackStopped", (trackItem) => {
@@ -87,8 +93,8 @@
             });
 
         } catch (error) {
-            console.error("WebRTC Error Context:", error);
-            statusDiv.innerText = `Error: ${error.message || "Failed to link. Verify App ID & Room settings."}`;
+            console.error("WebRTC Error:", error);
+            statusDiv.innerText = `Error: ${error.message || "Failed to link."}`;
             joinBtn.disabled = false;
         }
     };
