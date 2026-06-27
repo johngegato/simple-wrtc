@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PeerJS Serverless Audio Call</title>
-    <!-- Include the free PeerJS library -->
-    <script src="https://unpkg.com"></script>
+    <title>Reliable Serverless Audio Call</title>
+    <!-- Include Metered's production-ready WebRTC SDK -->
+    <script src="https://metered.ca"></script>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
         .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
@@ -20,130 +20,67 @@
 <body>
 
 <div class="card">
-    <h2>PeerJS Audio Call</h2>
-    
-    
-    <div id="step1">
-        <input type="text" id="myIdInput" placeholder="Enter Your Name (e.g., alex)">
-        <button id="registerBtn" class="start">1. Set My Name</button>
-    </div>
-
-    <!-- Step 2: Call the other device -->
-    <div id="step2" style="display:none;">
-        <input type="text" id="remoteIdInput" placeholder="Enter Friend's Name (e.g., sam)">
-        <button id="callBtn" class="start">2. Call Friend</button>
-        <button id="hangupBtn" class="hangup" disabled>🛑 Hang Up</button>
-    </div>
-
-    <div id="status">Status: Set your name to initialize</div>
+    <h2>Secure Audio Call</h2>
+    <input type="text" id="roomInput" placeholder="Enter Meeting Room (e.g., call99)">
+    <br>
+    <button id="joinBtn" class="start">📞 Join Room & Call</button>
+    <button id="hangupBtn" class="hangup" style="display:none;">🛑 Leave Call</button>
+    <div id="status">Status: Enter a shared room name to begin</div>
 </div>
 
-<!-- Audio element to playback the incoming voice -->
-<audio id="remoteAudio" autoplay></audio>
-
 <script>
-    let peer;
-    let localStream;
-    let currentCall;
+    // ⚠️ PASTE YOUR METERED APP ID HERE
+    const METERED_APP_ID = "myaudioapp"; 
 
-    const myIdInput = document.getElementById('myIdInput');
-    const registerBtn = document.getElementById('registerBtn');
-    const remoteIdInput = document.getElementById('remoteIdInput');
-    const callBtn = document.getElementById('callBtn');
+    let meetingFrame = null;
+    const roomInput = document.getElementById('roomInput');
+    const joinBtn = document.getElementById('joinBtn');
     const hangupBtn = document.getElementById('hangupBtn');
     const statusDiv = document.getElementById('status');
-    const remoteAudio = document.getElementById('remoteAudio');
 
-    // Step 1: Initialize PeerJS on the public cloud network
-    registerBtn.onclick = () => {
-        const myCustomId = myIdInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!myCustomId) return alert("Please enter an alphanumeric name");
+    joinBtn.onclick = async () => {
+        const roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!roomName) return alert("Please enter a room name");
 
-        statusDiv.innerText = "Status: Registering with PeerJS network...";
-
-        // Connects to PeerJS's free, globally distributed signaling server
-        peer = new Peer(myCustomId);
-
-        peer.on('open', (id) => {
-            statusDiv.innerText = `Status: Online as "${id}". Waiting for calls...`;
-            document.getElementById('step1').style.display = 'none';
-            document.getElementById('step2').style.display = 'block';
-        });
-
-        peer.on('error', (err) => {
-            statusDiv.innerText = "Status: ID might already be taken. Try another name.";
-            console.error(err);
-        });
-
-        // STEP 2A: Answer an incoming call automatically
-        peer.on('call', async (incomingCall) => {
-            statusDiv.innerText = "Status: Incoming call! Accessing microphone...";
-            currentCall = incomingCall;
-
-            try {
-                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-                
-                // Answer the call and pass our microphone audio back to them
-                currentCall.answer(localStream);
-                statusDiv.innerText = "Status: Call Connected";
-                hangupBtn.disabled = false;
-                callBtn.disabled = true;
-
-                // Play their audio stream
-                currentCall.on('stream', (remoteStream) => {
-                    remoteAudio.srcObject = remoteStream;
-                });
-
-                currentCall.on('close', handleCallEnd);
-            } catch (err) {
-                alert("Could not access microphone. Ensure your page uses HTTPS.");
-                statusDiv.innerText = "Status: Microphone Access Denied";
-            }
-        });
-    };
-
-    // STEP 2B: Initiate a call to the other device
-    callBtn.onclick = async () => {
-        const friendId = remoteIdInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!friendId) return alert("Please enter your friend's exact registered name");
-
-        statusDiv.innerText = `Status: Requesting mic to call "${friendId}"...`;
+        statusDiv.innerText = "Status: Connecting to private infrastructure...";
+        joinBtn.disabled = true;
 
         try {
-            localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-            
-            // Call the targeted friend ID and transmit our local audio stream
-            currentCall = peer.call(friendId, localStream);
-            statusDiv.innerText = "Status: Dialing friend...";
-            hangupBtn.disabled = false;
-            callBtn.disabled = true;
-
-            currentCall.on('stream', (remoteStream) => {
-                remoteAudio.srcObject = remoteStream;
-                statusDiv.innerText = "Status: Call Connected";
+            // Initialize Metered connection into your specified room name
+            meetingFrame = new MeteredFrame();
+            await meetingFrame.init({
+                roomURL: `${METERED_APP_ID}.metered.live/${roomName}`,
+                embedded: false // Opens native browser audio handlers
             });
 
-            currentCall.on('close', handleCallEnd);
-        } catch (err) {
-            alert("Could not access microphone.");
-            statusDiv.innerText = "Status: Call Failed";
+            // Automatically turn on microphone and join the WebRTC channel
+            await meetingFrame.join({
+                audioActive: true,
+                videoActive: false
+            });
+
+            statusDiv.innerText = `Status: Inside Room "${roomName}". Audio connected!`;
+            joinBtn.style.display = "none";
+            roomInput.style.display = "none";
+            hangupBtn.style.display = "inline-block";
+
+        } catch (error) {
+            console.error(error);
+            statusDiv.innerText = "Status: Connection Failed. Check App ID or Mic permissions.";
+            joinBtn.disabled = false;
         }
     };
 
-    hangupBtn.onclick = () => {
-        if (currentCall) currentCall.close();
-        handleCallEnd();
-    };
-
-    function handleCallEnd() {
-        if (localStream) {
-            localStream.getTracks().forEach(track => track.stop());
+    hangupBtn.onclick = async () => {
+        if (meetingFrame) {
+            await meetingFrame.leave();
         }
-        remoteAudio.srcObject = null;
-        callBtn.disabled = false;
-        hangupBtn.disabled = true;
-        statusDiv.innerText = "Status: Call Ended. Waiting for calls...";
-    }
+        statusDiv.innerText = "Status: Call Left";
+        joinBtn.style.display = "inline-block";
+        roomInput.style.display = "inline-block";
+        hangupBtn.style.display = "none";
+        joinBtn.disabled = false;
+    };
 </script>
 </body>
 </html>
