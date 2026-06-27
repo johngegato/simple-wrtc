@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Two-Way Global Voice Link - PeerJS</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
+        .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
+        button { font-size: 16px; padding: 12px 24px; margin: 10px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; width: 85%; }
+        .start { background: #10b981; color: white; }
+        .hangup { background: #ef4444; color: white; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; line-height: 1.4; min-height: 40px; }
+        input { padding: 10px; width: 80%; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; text-align: center; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>Global Voice Link (PeerJS)</h2>
+    <input type="text" id="roomInput" placeholder="Enter Shared Room Name" value="talk123">
+    <br>
+    <button id="joinBtn" class="start">📞 Connect Call</button>
+    <button id="hangupBtn" class="hangup" style="display:none;">🛑 End Call</button>
+    <div id="status">Status: Ready. Enter a shared room name to connect.</div>
+</div>
+
+<audio id="remoteAudio" autoplay playsinline style="width: 85%; margin-top: 15px;"></audio>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+    // ============= CONFIGURATION =============
+    const PEER_CONFIG = {
+        // Using PeerJS Cloud server by default
+        // For self-hosted: 
+        // host: 'your-peerjs-server.com',
+        // port: 9000,
+        // path: '/peerjs',
+    };
+    
+    // ============= STATE VARIABLES =============
+    let localStream = null;
+    let peer = null;
+    let call = null;
+    let roomName = "";
+    let peerIdA = null;
+    let isConnecting = false;
+
+    const roomInput = document.getElementById('roomInput');
+    const joinBtn = document.getElementById('joinBtn');
+    const hangupBtn = document.getElementById('hangupBtn');
+    const statusDiv = document.getElementById('status');
+    const remoteAudio = document.getElementById('remoteAudio');
+
+    // ============= MICROPHONE SETUP =============
+    async function startMicrophone() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("SECURE_CONTEXT_REQUIRED: Open via HTTPS to authorize media hardware.");
+        }
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }, 
+                video: false 
+            });
+        } catch (err) {
+            throw new Error("MIC_DENIED: Please allow microphone access.");
+        }
+    }
+
+    // ============= PEERJS SETUP =============
+    async function setupPeer(room) {
+        const peerId = `${room}-${Math.random().toString(36).substring(7)}`;
+        
+        peer = new Peer(peerId, PEER_CONFIG);
+
+        peer.on('open', (id) => {
+            peerIdA = id;
+            updateStatus(`Your ID: ${id}. Waiting for peer...`, "info");
+            console.log('My peer ID:', id);
+        });
+
+        peer.on('call', async (incomingCall) => {
+            updateStatus("Incoming call detected! Connecting...", "info");
+            call = incomingCall;
+            call.answer(localStream);
+            
+            call.on('stream', (remoteStream) => {
+                remoteAudio.srcObject = remoteStream;
+                remoteAudio.muted = false;
+                remoteAudio.volume = 1.0;
+                
+                remoteAudio.play().then(() => {
+                    updateStatus("Connected! Two-way audio active.", "success");
+                    joinBtn.style.display = "none";
+                }).catch(err => {
+                    updateStatus("⚠️ Connected! Tap to unmute.", "warning");
+                    joinBtn.innerText = "🔊 Unmute Voice Stream";
+                    joinBtn.style.display = "inline-block";
+                    joinBtn.disabled = false;
+                });
+            });
+
+            call.on('error', (err) => {
+                console.error('Call error:', err);
+                updateStatus("Call error occurred.", "error");
+            });
+
+            call.on('close', () => {
+                handleRemoteDisconnect();
+            });
+        });
+
+        peer.on('error', (err) => {
+            console.error('Peer error:', err);
+            updateStatus(`Peer error: ${err.type}`, "error");
+        });
+
+        peer.on('disconnected', () => {
+            updateStatus("Disconnected from PeerJS server.", "error");
+        });
+    }
+
+    // ============= UI EVENT HANDLERS =============
+    function updateStatus(message, type = "info") {
+        statusDiv.innerText = `Status: ${message}`;
+        
+        switch(type) {
+            case "success":
+                statusDiv.style.color = "#10b981";
+                break;
+            case "error":
+                statusDiv.style.color = "#ef4444";
+                break;
+            case "warning":
+                statusDiv.style.color = "#2563eb";
+                break;
+            default:
+                statusDiv.style.color = "#555";
+        }
+    }
+
+    joinBtn.onclick = async () => {
+        if (call) {
+            remoteAudio.play().catch(e => console.error(e));
+            joinBtn.style.display = "none";
+            updateStatus("Connected! Two-way audio active.", "success");
+            return;
+        }
+
+        roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!roomName) return alert("Please type a room name.");
+
+        if (isConnecting) return;
+        isConnecting = true;
+
+        updateStatus("Activating microphone...", "info");
+        joinBtn.disabled = true;
+
+        try {
+            await startMicrophone();
+            await setupPeer(roomName);
+            
+            joinBtn.style.display = "none";
+            roomInput.style.display = "none";
+            hangupBtn.style.display = "inline-block";
+        } catch (e) {
+            joinBtn.disabled = false;
+            isConnecting = false;
+            updateStatus(e.message, "error");
+        }
+    };
+
+    function resetApp() {
+        if (remoteAudio) {
+            remoteAudio.pause();
+            remoteAudio.srcObject = null;
+        }
+
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+            localStream = null;
+        }
+
+        if (call) {
+            call.close();
+            call = null;
+        }
+
+        if (peer) {
+            peer.destroy();
+            peer = null;
+        }
+
+        joinBtn.innerText = "📞 Connect Call";
+        joinBtn.style.display = "inline-block";
+        roomInput.style.display = "inline-block";
+        hangupBtn.style.display = "none";
+        joinBtn.disabled = false;
+        updateStatus("Ready. Enter a shared room name to connect.", "info");
+        
+        isConnecting = false;
+    }
+
+    hangupBtn.onclick = () => {
+        resetApp();
+    };
+
+    function handleRemoteDisconnect() {
+        resetApp();
+        updateStatus("The other device disconnected.", "info");
+    }
+
+    window.addEventListener('beforeunload', () => {
+        resetApp();
+    });
+</script>
+</body>
+</html>
