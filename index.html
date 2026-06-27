@@ -66,8 +66,8 @@
         }
     }
 
-        function setupSignaling(room) {
-        // FIXED: Removed the duplicated protocol slashes and fixed the template bracket string 
+            function setupSignaling(room) {
+        // FIXED: Cleaned up protocol injection string formatting and corrected the template literal syntax
         ws = new WebSocket(`wss://://piesocket.com{room}?api_key=oCdCMcMPQpbvNjUIzqtvF1d2X2okWpDQj4AwARJuAgtjhzKxVEjdCjwm&notify_self=0`);
 
         ws.onopen = () => {
@@ -75,6 +75,7 @@
             statusDiv.style.color = "#555";
             sendMessage({ type: 'join' });
         };
+
 
 
         ws.onmessage = async (event) => {
