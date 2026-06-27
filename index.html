@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Native WebRTC Audio Call</title>
+    <title>Global WebRTC Audio Call</title>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
         .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
@@ -18,23 +18,25 @@
 <body>
 
 <div class="card">
-    <h2>Native Browser Audio</h2>
-    <input type="text" id="roomInput" placeholder="Enter Room Name" value="talk123">
+    <h2>Global Audio Link</h2>
+    <input type="text" id="roomInput" placeholder="Enter Shared Room Name" value="talk123">
     <br>
-    <button id="joinBtn" class="start">📞 Start / Connect Call</button>
-    <button id="hangupBtn" class="hangup" style="display:none;">🛑 Leave Call</button>
-    <div id="status">Status: Ready. (No external dependencies)</div>
+    <button id="joinBtn" class="start">📞 Connect to Device</button>
+    <button id="hangupBtn" class="hangup" style="display:none;">🛑 End Call</button>
+    <div id="status">Status: Ready. Enter a shared room name to connect.</div>
 </div>
 
 <audio id="remoteAudio" autoplay></audio>
 
 <script>
+    // Configuration using public Google servers to tunnel through home routers and mobile firewalls
     const rtcConfig = { iceServers: [{ urls: 'stun:://google.com' }] };
     
     let localStream = null;
     let peerConnection = null;
-    let signalingChannel = null;
+    let ws = null;
     let myId = Math.random().toString(36).substring(7);
+    let roomName = "";
 
     const roomInput = document.getElementById('roomInput');
     const joinBtn = document.getElementById('joinBtn');
@@ -42,32 +44,46 @@
     const statusDiv = document.getElementById('status');
     const remoteAudio = document.getElementById('remoteAudio');
 
-    // Setup native browser signaling synchronization
-    function initSignaling(roomName) {
-        signalingChannel = new BroadcastChannel(`webrtc_audio_${roomName}`);
-        
-        signalingChannel.onmessage = async (event) => {
-            const data = event.data;
-            if (data.senderId === myId) return; // Skip own messages
+    async function startMedia() {
+        if (!localStream) {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            } catch (err) {
+                alert("Microphone permission required! Please grant access and try again.");
+                throw err;
+            }
+        }
+    }
 
-            if (data.type === 'discover') {
-                // Another device entered, broadcast existence back
-                statusDiv.innerText = "Status: Peer discovered! Syncing...";
-                signalingChannel.postMessage({ type: 'acknowledge', senderId: myId });
-                initiateCall();
-            }
-            else if (data.type === 'acknowledge') {
-                statusDiv.innerText = "Status: Peer ready. Creating link...";
-                initiateCall();
-            }
+    function setupSignaling(room) {
+        // Connects to a reliable, open global public signaling broker cluster
+        ws = new WebSocket(`wss://://piesocket.com{room}?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e6XIv987654321&notify_self=0`);
+
+        ws.onopen = () => {
+            statusDiv.innerText = `Status: Connected to Room "${room}". Waiting for other device...`;
+            // Announce presence to the other device
+            sendMessage({ type: 'join' });
+        };
+
+        ws.onmessage = async (event) => {
+            const data = JSON.parse(event.data);
+            if (data.senderId === myId) return; // Ignore self
+
+            if (data.type === 'join') {
+                statusDiv.innerText = "Status: Peer detected! Calling...";
+                await createPeerConnection();
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                sendMessage({ sdp: peerConnection.localDescription });
+            } 
             else if (data.sdp) {
-                if (!peerConnection) await setupPeerConnection();
+                if (!peerConnection) await createPeerConnection();
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
                 
                 if (data.sdp.type === 'offer') {
                     const answer = await peerConnection.createAnswer();
                     await peerConnection.setLocalDescription(answer);
-                    signalingChannel.postMessage({ sdp: peerConnection.localDescription, senderId: myId });
+                    sendMessage({ sdp: peerConnection.localDescription });
                 }
             } 
             else if (data.candidate) {
@@ -77,86 +93,88 @@
                     } catch (e) { console.error(e); }
                 }
             }
-            else if (data.type === 'hangup') {
+            else if (data.type === 'leave') {
                 handleRemoteHangup();
             }
         };
+
+        ws.onerror = () => {
+            statusDiv.innerText = "Status: Signaling error. Retrying...";
+        };
     }
 
-    async function setupPeerConnection() {
+    async function createPeerConnection() {
+        if (peerConnection) return;
+        
         peerConnection = new RTCPeerConnection(rtcConfig);
         
-        // Request microphone access dynamically
-        if (!localStream) {
-            try {
-                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-            } catch (err) {
-                alert("Microphone permission denied. App requires microphone access to function.");
-                throw err;
-            }
-        }
-
-        // Add stream tracks
+        // Add our microphone tracks
         localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
-        // Listen for incoming peer audio streams
+        // Connect the incoming sound stream to our hardware
         peerConnection.ontrack = (event) => {
             if (event.streams && event.streams[0]) {
                 remoteAudio.srcObject = event.streams[0];
-                statusDiv.innerText = "Status: Connected! Two-way audio active.";
+                statusDiv.innerText = "Status: Call Connected! Two-way audio active.";
             }
         };
 
-        // Broadcast ICE routes to other device
+        // Broadcast network route candidates to the other device
         peerConnection.onicecandidate = (event) => {
             if (event.candidate) {
-                signalingChannel.postMessage({ candidate: event.candidate, senderId: myId });
+                sendMessage({ candidate: event.candidate });
             }
         };
     }
 
-    async function initiateCall() {
-        if (!peerConnection) await setupPeerConnection();
-        const offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-        signalingChannel.postMessage({ sdp: peerConnection.localDescription, senderId: myId });
+    function sendMessage(message) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            message.senderId = myId;
+            ws.send(JSON.stringify(message));
+        }
     }
 
     joinBtn.onclick = async () => {
-        const roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!roomName) return alert("Please enter an alphanumeric room name.");
+        roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!roomName) return alert("Please enter a room name.");
 
-        statusDiv.innerText = "Status: Connecting to local mesh network...";
-        joinBtn.style.display = "none";
-        roomInput.style.display = "none";
-        hangupBtn.style.display = "inline-block";
+        statusDiv.innerText = "Status: Activating microphone...";
+        joinBtn.disabled = true;
 
-        initSignaling(roomName);
-        
-        // Broadcast presence message to see if anyone is in the room
-        signalingChannel.postMessage({ type: 'discover', senderId: myId });
+        try {
+            await startMedia();
+            setupSignaling(roomName);
+            
+            joinBtn.style.display = "none";
+            roomInput.style.display = "none";
+            hangupBtn.style.display = "inline-block";
+        } catch (e) {
+            joinBtn.disabled = false;
+            statusDiv.innerText = "Status: Audio activation failed.";
+        }
     };
 
-    function stopCall() {
+    function cleanUp() {
         if (localStream) localStream.getTracks().forEach(track => track.stop());
         if (peerConnection) { peerConnection.close(); peerConnection = null; }
-        if (signalingChannel) { signalingChannel.close(); signalingChannel = null; }
+        if (ws) { ws.close(); ws = null; }
         remoteAudio.srcObject = null;
         localStream = null;
         joinBtn.style.display = "inline-block";
         roomInput.style.display = "inline-block";
         hangupBtn.style.display = "none";
+        joinBtn.disabled = false;
     }
 
     hangupBtn.onclick = () => {
-        if (signalingChannel) signalingChannel.postMessage({ type: 'hangup', senderId: myId });
-        stopCall();
-        statusDiv.innerText = "Status: You disconnected.";
+        sendMessage({ type: 'leave' });
+        cleanUp();
+        statusDiv.innerText = "Status: Call ended.";
     };
 
     function handleRemoteHangup() {
-        stopCall();
-        statusDiv.innerText = "Status: Peer disconnected.";
+        cleanUp();
+        statusDiv.innerText = "Status: Friend hung up.";
     }
 </script>
 </body>
