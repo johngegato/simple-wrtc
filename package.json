@@ -1,0 +1,28 @@
+{
+  "name": "webrtc-signaling",
+  "version": "1.0.0",
+  "description": "WebRTC signaling server for global voice link",
+  "main": "alternatives/03-socketio-server.js",
+  "scripts": {
+    "start": "node alternatives/03-socketio-server.js",
+    "dev": "node alternatives/03-socketio-server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "webrtc",
+    "signaling",
+    "socket.io",
+    "voice",
+    "peer-to-peer"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.5.4",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
