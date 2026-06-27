@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Serverless WebRTC Audio Call</title>
-    <!-- Include the Pusher Library -->
-    <script src="https://pusher.com"></script>
+    <title>PeerJS Serverless Audio Call</title>
+    <!-- Include the free PeerJS library -->
+    <script src="https://unpkg.com"></script>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
         .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
@@ -20,155 +20,130 @@
 <body>
 
 <div class="card">
-    <h2>Serverless Audio Call</h2>
-    <input type="text" id="roomInput" placeholder="Enter Room Name (e.g., call123)">
-    <br>
-    <button id="connectBtn" class="start">🔑 Join Room</button>
-    <button id="startBtn" class="start" style="display:none;">📞 Start Call</button>
-    <button id="hangupBtn" class="hangup" disabled>🛑 Hang Up</button>
-    <div id="status">Status: Enter a room name to begin</div>
+    <h2>PeerJS Audio Call</h2>
+    
+    
+    <div id="step1">
+        <input type="text" id="myIdInput" placeholder="Enter Your Name (e.g., alex)">
+        <button id="registerBtn" class="start">1. Set My Name</button>
+    </div>
+
+    <!-- Step 2: Call the other device -->
+    <div id="step2" style="display:none;">
+        <input type="text" id="remoteIdInput" placeholder="Enter Friend's Name (e.g., sam)">
+        <button id="callBtn" class="start">2. Call Friend</button>
+        <button id="hangupBtn" class="hangup" disabled>🛑 Hang Up</button>
+    </div>
+
+    <div id="status">Status: Set your name to initialize</div>
 </div>
 
+<!-- Audio element to playback the incoming voice -->
 <audio id="remoteAudio" autoplay></audio>
 
 <script>
-    // Paste your exact Pusher Key and Cluster here
-    const PUSHER_KEY = 'de9110bcedc87362e1e4';
-    const PUSHER_CLUSTER = 'e569d42645c9d9df31f8';
-    // Paste your exact Pusher Key and Cluster here
-   // const PUSHER_KEY = 'YOUR_PUSHER_APP_KEY';
-   // const PUSHER_CLUSTER = 'YOUR_PUSHER_CLUSTER';
+    let peer;
+    let localStream;
+    let currentCall;
 
-    const rtcConfig = { iceServers: [{ urls: 'stun:://google.com' }] };
-    let localStream, peerConnection, pusher, channel, myId, roomName;
-
-    myId = Math.random().toString(36).substring(7); // Unique ID for this browser tab
-
-    const roomInput = document.getElementById('roomInput');
-    const connectBtn = document.getElementById('connectBtn');
-    const startBtn = document.getElementById('startBtn');
+    const myIdInput = document.getElementById('myIdInput');
+    const registerBtn = document.getElementById('registerBtn');
+    const remoteIdInput = document.getElementById('remoteIdInput');
+    const callBtn = document.getElementById('callBtn');
     const hangupBtn = document.getElementById('hangupBtn');
     const statusDiv = document.getElementById('status');
     const remoteAudio = document.getElementById('remoteAudio');
 
-    // Step 1: Connect to the room via Pusher
-    connectBtn.onclick = () => {
-        roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!roomName) return alert("Please enter an alphanumeric room name");
+    // Step 1: Initialize PeerJS on the public cloud network
+    registerBtn.onclick = () => {
+        const myCustomId = myIdInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!myCustomId) return alert("Please enter an alphanumeric name");
 
-        // Initialize Pusher with a local-testing authorization bypass trick
-        pusher = new Pusher(PUSHER_KEY, { 
-            cluster: PUSHER_CLUSTER, 
-            forceTLS: true,
-            userAuthentication: { endpoint: null }, // Serverless bypass
-            channelAuthorization: {
-                transport: 'jsonp',
-                endpoint: 'data:text/javascript,pusher.authorizer.success({"auth":"' + PUSHER_KEY + ':auth"})'
-            }
+        statusDiv.innerText = "Status: Registering with PeerJS network...";
+
+        // Connects to PeerJS's free, globally distributed signaling server
+        peer = new Peer(myCustomId);
+
+        peer.on('open', (id) => {
+            statusDiv.innerText = `Status: Online as "${id}". Waiting for calls...`;
+            document.getElementById('step1').style.display = 'none';
+            document.getElementById('step2').style.display = 'block';
         });
 
-        // Use a private- channel which permits client-side triggers
-        channel = pusher.subscribe(`private-audio-${roomName}`);
-
-        // Wait until the connection securely initializes before displaying the Call button
-        channel.bind('pusher:subscription_succeeded', () => {
-            statusDiv.innerText = `Status: Inside Room "${roomName}". Ready to dial!`;
-            connectBtn.style.display = 'none';
-            roomInput.style.display = 'none';
-            startBtn.style.display = 'inline-block';
+        peer.on('error', (err) => {
+            statusDiv.innerText = "Status: ID might already be taken. Try another name.";
+            console.error(err);
         });
 
-        channel.bind('pusher:subscription_error', (status) => {
-            statusDiv.innerText = "Status: Connection error. Check Pusher keys.";
-            console.error(status);
-        });
+        // STEP 2A: Answer an incoming call automatically
+        peer.on('call', async (incomingCall) => {
+            statusDiv.innerText = "Status: Incoming call! Accessing microphone...";
+            currentCall = incomingCall;
 
-        // Listen for signals sent by the other peer
-        channel.bind('client-signal', async (data) => {
-            if (data.senderId === myId) return; // Ignore our own signals
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                
+                // Answer the call and pass our microphone audio back to them
+                currentCall.answer(localStream);
+                statusDiv.innerText = "Status: Call Connected";
+                hangupBtn.disabled = false;
+                callBtn.disabled = true;
 
-            if (!peerConnection && (data.sdp || data.candidate)) {
-                await initializeCall();
-            }
+                // Play their audio stream
+                currentCall.on('stream', (remoteStream) => {
+                    remoteAudio.srcObject = remoteStream;
+                });
 
-            if (data.sdp) {
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
-                if (data.sdp.type === 'offer') {
-                    const answer = await peerConnection.createAnswer();
-                    await peerConnection.setLocalDescription(answer);
-                    sendSignal({ sdp: peerConnection.localDescription });
-                }
-            } else if (data.candidate) {
-                try {
-                    await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-                } catch (e) { console.error(e); }
-            } else if (data.hangup) {
-                handleRemoteHangup();
+                currentCall.on('close', handleCallEnd);
+            } catch (err) {
+                alert("Could not access microphone. Ensure your page uses HTTPS.");
+                statusDiv.innerText = "Status: Microphone Access Denied";
             }
         });
     };
 
-    function sendSignal(payload) {
-        payload.senderId = myId;
-        // Broadcast signal to everyone else in the room
-        channel.trigger('client-signal', payload);
-    }
+    // STEP 2B: Initiate a call to the other device
+    callBtn.onclick = async () => {
+        const friendId = remoteIdInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!friendId) return alert("Please enter your friend's exact registered name");
 
-    async function initializeCall() {
+        statusDiv.innerText = `Status: Requesting mic to call "${friendId}"...`;
+
         try {
             localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            
+            // Call the targeted friend ID and transmit our local audio stream
+            currentCall = peer.call(friendId, localStream);
+            statusDiv.innerText = "Status: Dialing friend...";
+            hangupBtn.disabled = false;
+            callBtn.disabled = true;
+
+            currentCall.on('stream', (remoteStream) => {
+                remoteAudio.srcObject = remoteStream;
+                statusDiv.innerText = "Status: Call Connected";
+            });
+
+            currentCall.on('close', handleCallEnd);
         } catch (err) {
-            alert("Microphone access denied or unavailable. Ensure you are testing over HTTPS.");
-            return;
+            alert("Could not access microphone.");
+            statusDiv.innerText = "Status: Call Failed";
         }
-        
-        peerConnection = new RTCPeerConnection(rtcConfig);
-        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-
-        peerConnection.ontrack = (event) => {
-            if (event.streams && event.streams[0]) {
-                remoteAudio.srcObject = event.streams[0];
-                statusDiv.innerText = "Status: In Active Call";
-            }
-        };
-
-        peerConnection.onicecandidate = (event) => {
-            if (event.candidate) sendSignal({ candidate: event.candidate });
-        };
-
-        startBtn.disabled = true;
-        hangupBtn.disabled = false;
-    }
-
-    startBtn.onclick = async () => {
-        statusDiv.innerText = "Status: Dialing...";
-        await initializeCall();
-        const offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-        sendSignal({ sdp: peerConnection.localDescription });
     };
-
-    function stopTracks() {
-        if (localStream) localStream.getTracks().forEach(track => track.stop());
-        if (peerConnection) { peerConnection.close(); peerConnection = null; }
-        remoteAudio.srcObject = null;
-        startBtn.disabled = false;
-        hangupBtn.disabled = true;
-    }
 
     hangupBtn.onclick = () => {
-        sendSignal({ hangup: true });
-        stopTracks();
-        statusDiv.innerText = "Status: You hung up";
+        if (currentCall) currentCall.close();
+        handleCallEnd();
     };
 
-    function handleRemoteHangup() {
-        stopTracks();
-        statusDiv.innerText = "Status: Peer hung up";
+    function handleCallEnd() {
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+        }
+        remoteAudio.srcObject = null;
+        callBtn.disabled = false;
+        hangupBtn.disabled = true;
+        statusDiv.innerText = "Status: Call Ended. Waiting for calls...";
     }
-
-    
-        
 </script>
 </body>
 </html>
