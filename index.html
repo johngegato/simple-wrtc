@@ -3,7 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Global WebRTC Audio Call</title>
+    <title>Fixed Serverless Audio Call</title>
+    <!-- Corrected production-ready Metered Core SDK CDN -->
+    <script src="https://cdn.metered.ca/sdk/video/1.4.6/sdk.min.js"></script>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
         .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
@@ -11,185 +13,111 @@
         .start { background: #10b981; color: white; }
         .hangup { background: #ef4444; color: white; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; line-height: 1.4; }
+        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; }
         input { padding: 10px; width: 80%; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; text-align: center; }
     </style>
 </head>
 <body>
 
 <div class="card">
-    <h2>Global Audio Link</h2>
-    <input type="text" id="roomInput" placeholder="Enter Shared Room Name" value="talk123">
+    <h2>Secure Voice Link</h2>
+    <input type="text" id="roomInput" placeholder="Enter Room (e.g., talk123)" value="talk123">
     <br>
-    <button id="joinBtn" class="start">📞 Connect to Device</button>
-    <button id="hangupBtn" class="hangup" style="display:none;">🛑 End Call</button>
-    <div id="status">Status: Ready. Enter a shared room name to connect.</div>
+    <button id="joinBtn" class="start">📞 Join Call</button>
+    <button id="hangupBtn" class="hangup" style="display:none;">🛑 Leave Call</button>
+    <div id="status">Status: Ready. Make sure the room exists in Metered dashboard.</div>
 </div>
 
+<!-- Audio element for hardware routing -->
 <audio id="remoteAudio" autoplay></audio>
 
 <script>
-    const rtcConfig = { iceServers: [{ urls: 'stun:://google.com' }] };
-    
-    let localStream = null;
-    let peerConnection = null;
-    let ws = null;
-    let myId = Math.random().toString(36).substring(7);
-    let roomName = "";
+    // ⚠️ REPLACE WITH YOUR EXACT PREFIX FROM METERED (e.g., "mytestapp")
+    const METERED_APP_ID = "myaudioapp"; 
 
+    let meeting = null;
     const roomInput = document.getElementById('roomInput');
     const joinBtn = document.getElementById('joinBtn');
     const hangupBtn = document.getElementById('hangupBtn');
     const statusDiv = document.getElementById('status');
     const remoteAudio = document.getElementById('remoteAudio');
 
-    async function startMedia() {
-        // Explicitly guard against non-secure HTTP contexts
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            throw new Error("SECURE_CONTEXT_REQUIRED: Browser blocked media APIs. You MUST use a secure URL (https://) to host and test WebRTC calls.");
-        }
-
-        try {
-            // Native fallback constraint definitions
-            localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        } catch (err) {
-            // Parse system logs explicitly for diagnostic visibility
-            if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-                throw new Error("MIC_DENIED: User or system privacy layout explicitly blocked microphone authorization.");
-            } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-                throw new Error("NO_HARDWARE: No physical audio capture equipment or functional microphone was found.");
-            } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-                throw new Error("HARDWARE_LOCKED: Your device microphone is locked by another open program (e.g., Zoom, Teams, Discord).");
-            } else {
-                throw new Error(`SYSTEM_ERROR: ${err.name} -> ${err.message}`);
-            }
-        }
-    }
-
-            function setupSignaling(room) {
-        // FIXED: Cleaned up protocol injection string formatting and corrected the template literal syntax
-        ws = new WebSocket(`wss://://piesocket.com{room}?api_key=oCdCMcMPQpbvNjUIzqtvF1d2X2okWpDQj4AwARJuAgtjhzKxVEjdCjwm&notify_self=0`);
-
-        ws.onopen = () => {
-            statusDiv.innerText = `Status: Connected to Room "${room}". Waiting for other device...`;
-            statusDiv.style.color = "#555";
-            sendMessage({ type: 'join' });
-        };
-
-
-
-        ws.onmessage = async (event) => {
-            const data = JSON.parse(event.data);
-            if (data.senderId === myId) return;
-
-            if (data.type === 'join') {
-                statusDiv.innerText = "Status: Peer detected! Exchanging voice streams...";
-                await createPeerConnection();
-                const offer = await peerConnection.createOffer();
-                await peerConnection.setLocalDescription(offer);
-                sendMessage({ sdp: peerConnection.localDescription });
-            } 
-            else if (data.sdp) {
-                if (!peerConnection) await createPeerConnection();
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
-                
-                if (data.sdp.type === 'offer') {
-                    const answer = await peerConnection.createAnswer();
-                    await peerConnection.setLocalDescription(answer);
-                    sendMessage({ sdp: peerConnection.localDescription });
-                }
-            } 
-            else if (data.candidate) {
-                if (peerConnection) {
-                    try {
-                        await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-                    } catch (e) { console.error(e); }
-                }
-            }
-            else if (data.type === 'leave') {
-                handleRemoteHangup();
-            }
-        };
-
-        ws.onerror = () => {
-            statusDiv.innerText = "Status: Connection server temporarily resetting. Please wait...";
-        };
-    }
-
-    async function createPeerConnection() {
-        if (peerConnection) return;
-        
-        peerConnection = new RTCPeerConnection(rtcConfig);
-        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-
-        peerConnection.ontrack = (event) => {
-            if (event.streams && event.streams[0]) {
-                remoteAudio.srcObject = event.streams[0];
-                statusDiv.innerText = "Status: Call Connected! Two-way audio is now fully active.";
-                statusDiv.style.color = "#10b981";
-            }
-        };
-
-        peerConnection.onicecandidate = (event) => {
-            if (event.candidate) {
-                sendMessage({ candidate: event.candidate });
-            }
-        };
-    }
-
-    function sendMessage(message) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            message.senderId = myId;
-            ws.send(JSON.stringify(message));
+    // Helper function to process and attach an audio track
+    function handleIncomingAudioTrack(trackItem) {
+        if (trackItem && trackItem.type === "audio" && trackItem.track) {
+            statusDiv.innerText = "Status: Connected! Streaming peer voice.";
+            const remoteStream = new MediaStream([trackItem.track]);
+            remoteAudio.srcObject = remoteStream;
+            // Safari/Chrome autoplay safety override
+            remoteAudio.play().catch(e => console.log("Autoplay catch:", e));
         }
     }
 
     joinBtn.onclick = async () => {
-        roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!roomName) return alert("Please enter a room name.");
+        const roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!roomName) return alert("Please enter a room name");
 
-        statusDiv.innerText = "Status: Accessing hardware stream...";
-        statusDiv.style.color = "#555";
+        statusDiv.innerText = "Status: Connecting to network...";
         joinBtn.disabled = true;
 
         try {
-            await startMedia();
-            setupSignaling(roomName);
+            meeting = new Metered.Meeting();
             
+            const targetRoomURL = `${METERED_APP_ID}.metered.live/${roomName}`;
+            statusDiv.innerText = `Status: Accessing room url: ${targetRoomURL}`;
+
+            // Join the WebRTC session room
+            await meeting.join({
+                roomURL: targetRoomURL,
+                name: "User-" + Math.floor(Math.random() * 100)
+            });
+
+            statusDiv.innerText = "Status: Room joined! Activating microphone...";
+
+            // Fire up microphone capture
+            await meeting.startAudio();
+            
+            statusDiv.innerText = `Status: Live in "${roomName}". Synchronizing audio streams...`;
             joinBtn.style.display = "none";
             roomInput.style.display = "none";
             hangupBtn.style.display = "inline-block";
-        } catch (e) {
+
+            // 🔥 FIX: Instantly catch audio if the other peer is already inside the room streaming
+            if (meeting.remoteTracks && Array.isArray(meeting.remoteTracks)) {
+                meeting.remoteTracks.forEach(trackItem => {
+                    handleIncomingAudioTrack(trackItem);
+                });
+            }
+
+            // Listen for any peers who start streaming *after* you have already joined
+            meeting.on("remoteTrackStarted", (trackItem) => {
+                handleIncomingAudioTrack(trackItem);
+            });
+
+            meeting.on("remoteTrackStopped", (trackItem) => {
+                statusDiv.innerText = "Status: Peer left or muted.";
+                remoteAudio.srcObject = null;
+            });
+
+        } catch (error) {
+            console.error("WebRTC Error Context:", error);
+            statusDiv.innerText = `Error: ${error.message || "Failed to link. Verify App ID & Room settings."}`;
             joinBtn.disabled = false;
-            statusDiv.innerText = `${e.message}`;
-            statusDiv.style.color = "#ef4444";
         }
     };
 
-    function cleanUp() {
-        if (localStream) localStream.getTracks().forEach(track => track.stop());
-        if (peerConnection) { peerConnection.close(); peerConnection = null; }
-        if (ws) { ws.close(); ws = null; }
+    hangupBtn.onclick = async () => {
+        if (meeting) {
+            await meeting.stopAudio();
+            await meeting.leaveMeeting();
+        }
         remoteAudio.srcObject = null;
-        localStream = null;
+        statusDiv.innerText = "Status: Call disconnected.";
         joinBtn.style.display = "inline-block";
         roomInput.style.display = "inline-block";
         hangupBtn.style.display = "none";
         joinBtn.disabled = false;
-    }
-
-    hangupBtn.onclick = () => {
-        sendMessage({ type: 'leave' });
-        cleanUp();
-        statusDiv.innerText = "Status: Call ended.";
-        statusDiv.style.color = "#555";
     };
-
-    function handleRemoteHangup() {
-        cleanUp();
-        statusDiv.innerText = "Status: Remote device left the channel.";
-        statusDiv.style.color = "#555";
-    }
 </script>
 </body>
 </html>
