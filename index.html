@@ -3,27 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Two-Way Global Voice Link</title>
+    <title>Two-Way Global Voice Link - Socket.IO</title>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
         .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
         button { font-size: 16px; padding: 12px 24px; margin: 10px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; width: 85%; }
         .start { background: #10b981; color: white; }
-        .unmute-pulse { background: #2563eb; color: white; animation: pulse 1.8s infinite; }
         .hangup { background: #ef4444; color: white; }
         button:disabled { background: #ccc; cursor: not-allowed; }
         #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; line-height: 1.4; min-height: 40px; }
         input { padding: 10px; width: 80%; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; text-align: center; }
-        .audio-indicator { display: inline-block; width: 10px; height: 10px; background: #10b981; border-radius: 50%; margin-left: 8px; animation: none; }
-        .audio-indicator.active { animation: audioLevel 0.3s ease-out; }
-        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.03); } 100% { transform: scale(1); } }
-        @keyframes audioLevel { 0% { transform: scale(1.5); opacity: 1; } 100% { transform: scale(1); opacity: 0.6; } }
     </style>
 </head>
 <body>
 
 <div class="card">
-    <h2>Global Voice Link</h2>
+    <h2>Global Voice Link (Socket.IO)</h2>
     <input type="text" id="roomInput" placeholder="Enter Shared Room Name" value="talk123">
     <br>
     <button id="joinBtn" class="start">📞 Connect Call</button>
@@ -31,12 +26,11 @@
     <div id="status">Status: Ready. Enter a shared room name to connect.</div>
 </div>
 
-<!-- Visible audio element to fully bypass mobile operating system hardware locks -->
 <audio id="remoteAudio" autoplay playsinline style="width: 85%; margin-top: 15px;"></audio>
 
+<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <script>
     // ============= CONFIGURATION =============
-    // Universal STUN servers to navigate home routers and mobile NAT firewalls
     const rtcConfig = { 
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
@@ -45,19 +39,16 @@
         ] 
     };
     
-    const SIGNALING_SERVER = "wss://demo.piesocket.com/v3/";
-    const API_KEY = "oCdCMcMPQpbvNjUIzqtvF1d2X2okWpDQj4AwARJuAgtjhzKxVEjdCjwm";
-    const RECONNECT_TIMEOUT = 5000; // 5 seconds
-    const CONNECTION_TIMEOUT = 15000; // 15 seconds
+    // NOTE: Replace with your own Socket.IO server URL
+    const SIGNALING_SERVER = "https://your-socketio-server.com";
+    const CONNECTION_TIMEOUT = 15000;
     
     // ============= STATE VARIABLES =============
     let localStream = null;
     let peerConnection = null;
-    let ws = null;
+    let socket = null;
     let myId = Math.random().toString(36).substring(7);
     let roomName = "";
-    let reconnectAttempts = 0;
-    let maxReconnectAttempts = 3;
     let connectionTimeoutId = null;
     let isConnecting = false;
 
@@ -82,103 +73,76 @@
                 video: false 
             });
         } catch (err) {
-            throw new Error("MIC_DENIED: Please toggle your address bar settings to permit microphone access.");
+            throw new Error("MIC_DENIED: Please allow microphone access.");
         }
     }
 
-    // ============= WEBSOCKET SIGNALING =============
+    // ============= SOCKET.IO SIGNALING =============
     function setupSignaling(room) {
-        // Build connection string using template literal for clarity
-        const signalURL = `${SIGNALING_SERVER}${room}?api_key=${API_KEY}&notify_self=0`;
-        
-        try {
-            ws = new WebSocket(signalURL);
-        } catch (e) {
-            updateStatus("Failed to create WebSocket connection", "error");
-            return;
-        }
+        socket = io(SIGNALING_SERVER, {
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            reconnectionAttempts: 5,
+            query: { userId: myId }
+        });
 
-        ws.onopen = () => {
-            reconnectAttempts = 0;
+        socket.on('connect', () => {
             isConnecting = false;
-            updateStatus(`Inside Room "${room}". Waiting for other device...`, "info");
-            // Announce presence immediately to catch any listening peer already in the room
-            sendSignal({ type: 'announcement' });
+            updateStatus(`Connected to server. Joining room "${room}"...`, "info");
+            socket.emit('join-room', { roomName: room, userId: myId });
             
-            // Set connection timeout
             clearTimeout(connectionTimeoutId);
             connectionTimeoutId = setTimeout(() => {
                 if (peerConnection && peerConnection.connectionState !== 'connected') {
                     updateStatus("Connection timeout. No peer found in room.", "error");
                 }
             }, CONNECTION_TIMEOUT);
-        };
+        });
 
-        ws.onmessage = async (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                if (data.senderId === myId) return; // Skip our own echoed messages
+        socket.on('peer-joined', async (data) => {
+            updateStatus("Device detected! Exchanging voice lines...", "info");
+            clearTimeout(connectionTimeoutId);
+            
+            await initPeerConnection();
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            socket.emit('signal', { sdp: offer, to: data.peerId });
+        });
 
-                // When a peer is detected, initialize the RTCPeerConnection and emit the WebRTC offer
-                if (data.type === 'announcement') {
-                    clearTimeout(connectionTimeoutId);
-                    updateStatus("Device detected! Exchanging voice lines...", "info");
-                    await initPeerConnection();
-                    const offer = await peerConnection.createOffer();
-                    await peerConnection.setLocalDescription(offer);
-                    sendSignal({ sdp: peerConnection.localDescription });
-                } 
-                else if (data.sdp) {
-                    if (!peerConnection) await initPeerConnection();
-                    // Don't wrap in RTCSessionDescription - use plain object
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
-                    
-                    if (data.sdp.type === 'offer') {
-                        const answer = await peerConnection.createAnswer();
-                        await peerConnection.setLocalDescription(answer);
-                        sendSignal({ sdp: peerConnection.localDescription });
-                    }
-                } 
-                else if (data.candidate) {
-                    // Only add ICE candidate if remote description is set
-                    if (peerConnection && peerConnection.remoteDescription) {
-                        try {
-                            await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-                        } catch (e) { 
-                            console.error("ICE candidate error:", e);
-                        }
+        socket.on('signal', async (data) => {
+            if (data.sdp) {
+                if (!peerConnection) await initPeerConnection();
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                
+                if (data.sdp.type === 'offer') {
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    socket.emit('signal', { sdp: answer, to: data.from });
+                }
+            } else if (data.candidate) {
+                if (peerConnection && peerConnection.remoteDescription) {
+                    try {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                    } catch (e) { 
+                        console.error("ICE candidate error:", e);
                     }
                 }
-                else if (data.type === 'exit') {
-                    handleRemoteDisconnect();
-                }
-            } catch (e) {
-                console.error("Error processing signaling message:", e);
             }
-        };
+        });
 
-        ws.onerror = (e) => { 
-            console.error("WebSocket Error:", e);
-            updateStatus("Connection server issue. Retrying...", "error");
-        };
+        socket.on('peer-left', () => {
+            handleRemoteDisconnect();
+        });
 
-        ws.onclose = () => {
-            handleWebSocketClose();
-        };
-    }
+        socket.on('disconnect', () => {
+            updateStatus("Disconnected from signaling server. Attempting to reconnect...", "error");
+        });
 
-    function handleWebSocketClose() {
-        if (!isConnecting || reconnectAttempts < maxReconnectAttempts) {
-            reconnectAttempts++;
-            updateStatus(`Connection lost. Reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...`, "error");
-            setTimeout(() => {
-                if (roomName && peerConnection) {
-                    setupSignaling(roomName);
-                }
-            }, RECONNECT_TIMEOUT);
-        } else {
-            updateStatus("Unable to reconnect to signaling server.", "error");
-        }
+        socket.on('error', (error) => {
+            console.error("Socket.IO error:", error);
+            updateStatus("Connection error. Please check server.", "error");
+        });
     }
 
     // ============= PEER CONNECTION SETUP =============
@@ -187,25 +151,18 @@
         
         peerConnection = new RTCPeerConnection(rtcConfig);
         
-        // Feed local microphone data into the WebRTC instance pipeline
         localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
-        // Monitor connection state
         peerConnection.onconnectionstatechange = () => {
             console.log("Connection state:", peerConnection.connectionState);
             if (peerConnection.connectionState === 'failed') {
                 updateStatus("Connection failed. Attempting to reconnect...", "error");
-            } else if (peerConnection.connectionState === 'disconnected') {
-                updateStatus("Connection disconnected.", "error");
             }
         };
 
-        // Connect the audio stream coming from the remote peer directly to hardware output
         peerConnection.ontrack = (event) => {
             if (event.streams && event.streams[0]) {
                 remoteAudio.srcObject = event.streams[0];
-                
-                // Override browser volume and muting rules explicitly
                 remoteAudio.muted = false;
                 remoteAudio.volume = 1.0;
 
@@ -213,10 +170,8 @@
                     updateStatus("Connected! Two-way audio active.", "success");
                     joinBtn.style.display = "none";
                 }).catch(err => {
-                    // Mobile gesture safety lock handler: allows manual trigger fallback unmuting
-                    updateStatus("⚠️ Connected! Tap the blue button below to unmute your friend's voice.", "warning");
+                    updateStatus("⚠️ Connected! Tap to unmute.", "warning");
                     joinBtn.innerText = "🔊 Unmute Voice Stream";
-                    joinBtn.className = "start unmute-pulse";
                     joinBtn.style.display = "inline-block";
                     joinBtn.disabled = false;
                 });
@@ -224,25 +179,13 @@
         };
 
         peerConnection.onicecandidate = (event) => {
-            if (event.candidate) sendSignal({ candidate: event.candidate });
-        };
-
-        // Monitor ICE connection state
-        peerConnection.oniceconnectionstatechange = () => {
-            console.log("ICE connection state:", peerConnection.iceConnectionState);
+            if (event.candidate) {
+                socket.emit('signal', { candidate: event.candidate });
+            }
         };
     }
 
-    // ============= SIGNALING HELPERS =============
-    function sendSignal(msg) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            msg.senderId = myId;
-            ws.send(JSON.stringify(msg));
-        } else {
-            console.warn("WebSocket not ready for sending signal");
-        }
-    }
-
+    // ============= UI EVENT HANDLERS =============
     function updateStatus(message, type = "info") {
         statusDiv.innerText = `Status: ${message}`;
         
@@ -261,9 +204,7 @@
         }
     }
 
-    // ============= UI EVENT HANDLERS =============
     joinBtn.onclick = async () => {
-        // GESTURE FALLBACK INTERCEPT: Unlocks hardware speaker stream if auto-play fails
         if (peerConnection) {
             remoteAudio.play().catch(e => console.error(e));
             joinBtn.style.display = "none";
@@ -274,7 +215,7 @@
         roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!roomName) return alert("Please type a room name.");
 
-        if (isConnecting) return; // Prevent multiple simultaneous connection attempts
+        if (isConnecting) return;
         isConnecting = true;
 
         updateStatus("Activating microphone...", "info");
@@ -295,36 +236,29 @@
     };
 
     function resetApp() {
-        // Stop audio playback and cleanup
         if (remoteAudio) {
             remoteAudio.pause();
             remoteAudio.srcObject = null;
         }
 
-        // Stop local tracks
         if (localStream) {
             localStream.getTracks().forEach(track => track.stop());
             localStream = null;
         }
 
-        // Close peer connection
         if (peerConnection) { 
             peerConnection.close(); 
             peerConnection = null; 
         }
 
-        // Close WebSocket
-        if (ws) { 
-            ws.close(); 
-            ws = null; 
+        if (socket) { 
+            socket.disconnect(); 
+            socket = null; 
         }
 
-        // Clear timeouts
         clearTimeout(connectionTimeoutId);
 
-        // Reset UI
         joinBtn.innerText = "📞 Connect Call";
-        joinBtn.className = "start";
         joinBtn.style.display = "inline-block";
         roomInput.style.display = "inline-block";
         hangupBtn.style.display = "none";
@@ -332,11 +266,10 @@
         updateStatus("Ready. Enter a shared room name to connect.", "info");
         
         isConnecting = false;
-        reconnectAttempts = 0;
     }
 
     hangupBtn.onclick = () => {
-        sendSignal({ type: 'exit' });
+        socket.emit('leave-room', { roomName });
         resetApp();
     };
 
@@ -345,9 +278,8 @@
         updateStatus("The other device disconnected.", "info");
     }
 
-    // ============= CLEANUP ON PAGE UNLOAD =============
     window.addEventListener('beforeunload', () => {
-        sendSignal({ type: 'exit' });
+        if (socket) socket.emit('leave-room', { roomName });
         resetApp();
     });
 </script>
