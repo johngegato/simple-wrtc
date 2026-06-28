@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Two-Way Global Voice Link - Socket.IO</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f0f2f5; }
+        .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; }
+        button { font-size: 16px; padding: 12px 24px; margin: 10px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; width: 85%; }
+        .start { background: #10b981; color: white; }
+        .hangup { background: #ef4444; color: white; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        #status { margin-top: 15px; font-weight: bold; color: #555; word-wrap: break-word; line-height: 1.4; min-height: 40px; }
+        input { padding: 10px; width: 80%; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; text-align: center; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>Global Voice Link (Socket.IO)</h2>
+    <input type="text" id="roomInput" placeholder="Enter Shared Room Name" value="talk123">
+    <br>
+    <button id="joinBtn" class="start">📞 Connect Call</button>
+    <button id="hangupBtn" class="hangup" style="display:none;">🛑 End Call</button>
+    <div id="status">Status: Ready. Enter a shared room name to connect.</div>
+</div>
+
+<audio id="remoteAudio" autoplay playsinline style="width: 85%; margin-top: 15px;"></audio>
+
+<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+<script>
+    // ============= CONFIGURATION =============
+    const rtcConfig = { 
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' }
+        ] 
+    };
+    
+    // NOTE: Replace with your own Socket.IO server URL
+    const SIGNALING_SERVER = "https://your-socketio-server.com";
+    const CONNECTION_TIMEOUT = 15000;
+    
+    // ============= STATE VARIABLES =============
+    let localStream = null;
+    let peerConnection = null;
+    let socket = null;
+    let myId = Math.random().toString(36).substring(7);
+    let roomName = "";
+    let connectionTimeoutId = null;
+    let isConnecting = false;
+
+    const roomInput = document.getElementById('roomInput');
+    const joinBtn = document.getElementById('joinBtn');
+    const hangupBtn = document.getElementById('hangupBtn');
+    const statusDiv = document.getElementById('status');
+    const remoteAudio = document.getElementById('remoteAudio');
+
+    // ============= MICROPHONE SETUP =============
+    async function startMicrophone() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("SECURE_CONTEXT_REQUIRED: Open via HTTPS to authorize media hardware.");
+        }
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }, 
+                video: false 
+            });
+        } catch (err) {
+            throw new Error("MIC_DENIED: Please allow microphone access.");
+        }
+    }
+
+    // ============= SOCKET.IO SIGNALING =============
+    function setupSignaling(room) {
+        socket = io(SIGNALING_SERVER, {
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            reconnectionAttempts: 5,
+            query: { userId: myId }
+        });
+
+        socket.on('connect', () => {
+            isConnecting = false;
+            updateStatus(`Connected to server. Joining room "${room}"...`, "info");
+            socket.emit('join-room', { roomName: room, userId: myId });
+            
+            clearTimeout(connectionTimeoutId);
+            connectionTimeoutId = setTimeout(() => {
+                if (peerConnection && peerConnection.connectionState !== 'connected') {
+                    updateStatus("Connection timeout. No peer found in room.", "error");
+                }
+            }, CONNECTION_TIMEOUT);
+        });
+
+        socket.on('peer-joined', async (data) => {
+            updateStatus("Device detected! Exchanging voice lines...", "info");
+            clearTimeout(connectionTimeoutId);
+            
+            await initPeerConnection();
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            socket.emit('signal', { sdp: offer, to: data.peerId });
+        });
+
+        socket.on('signal', async (data) => {
+            if (data.sdp) {
+                if (!peerConnection) await initPeerConnection();
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                
+                if (data.sdp.type === 'offer') {
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    socket.emit('signal', { sdp: answer, to: data.from });
+                }
+            } else if (data.candidate) {
+                if (peerConnection && peerConnection.remoteDescription) {
+                    try {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                    } catch (e) { 
+                        console.error("ICE candidate error:", e);
+                    }
+                }
+            }
+        });
+
+        socket.on('peer-left', () => {
+            handleRemoteDisconnect();
+        });
+
+        socket.on('disconnect', () => {
+            updateStatus("Disconnected from signaling server. Attempting to reconnect...", "error");
+        });
+
+        socket.on('error', (error) => {
+            console.error("Socket.IO error:", error);
+            updateStatus("Connection error. Please check server.", "error");
+        });
+    }
+
+    // ============= PEER CONNECTION SETUP =============
+    async function initPeerConnection() {
+        if (peerConnection) return;
+        
+        peerConnection = new RTCPeerConnection(rtcConfig);
+        
+        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+        peerConnection.onconnectionstatechange = () => {
+            console.log("Connection state:", peerConnection.connectionState);
+            if (peerConnection.connectionState === 'failed') {
+                updateStatus("Connection failed. Attempting to reconnect...", "error");
+            }
+        };
+
+        peerConnection.ontrack = (event) => {
+            if (event.streams && event.streams[0]) {
+                remoteAudio.srcObject = event.streams[0];
+                remoteAudio.muted = false;
+                remoteAudio.volume = 1.0;
+
+                remoteAudio.play().then(() => {
+                    updateStatus("Connected! Two-way audio active.", "success");
+                    joinBtn.style.display = "none";
+                }).catch(err => {
+                    updateStatus("⚠️ Connected! Tap to unmute.", "warning");
+                    joinBtn.innerText = "🔊 Unmute Voice Stream";
+                    joinBtn.style.display = "inline-block";
+                    joinBtn.disabled = false;
+                });
+            }
+        };
+
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                socket.emit('signal', { candidate: event.candidate });
+            }
+        };
+    }
+
+    // ============= UI EVENT HANDLERS =============
+    function updateStatus(message, type = "info") {
+        statusDiv.innerText = `Status: ${message}`;
+        
+        switch(type) {
+            case "success":
+                statusDiv.style.color = "#10b981";
+                break;
+            case "error":
+                statusDiv.style.color = "#ef4444";
+                break;
+            case "warning":
+                statusDiv.style.color = "#2563eb";
+                break;
+            default:
+                statusDiv.style.color = "#555";
+        }
+    }
+
+    joinBtn.onclick = async () => {
+        if (peerConnection) {
+            remoteAudio.play().catch(e => console.error(e));
+            joinBtn.style.display = "none";
+            updateStatus("Connected! Two-way audio active.", "success");
+            return;
+        }
+
+        roomName = roomInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!roomName) return alert("Please type a room name.");
+
+        if (isConnecting) return;
+        isConnecting = true;
+
+        updateStatus("Activating microphone...", "info");
+        joinBtn.disabled = true;
+
+        try {
+            await startMicrophone();
+            setupSignaling(roomName);
+            
+            joinBtn.style.display = "none";
+            roomInput.style.display = "none";
+            hangupBtn.style.display = "inline-block";
+        } catch (e) {
+            joinBtn.disabled = false;
+            isConnecting = false;
+            updateStatus(e.message, "error");
+        }
+    };
+
+    function resetApp() {
+        if (remoteAudio) {
+            remoteAudio.pause();
+            remoteAudio.srcObject = null;
+        }
+
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+            localStream = null;
+        }
+
+        if (peerConnection) { 
+            peerConnection.close(); 
+            peerConnection = null; 
+        }
+
+        if (socket) { 
+            socket.disconnect(); 
+            socket = null; 
+        }
+
+        clearTimeout(connectionTimeoutId);
+
+        joinBtn.innerText = "📞 Connect Call";
+        joinBtn.style.display = "inline-block";
+        roomInput.style.display = "inline-block";
+        hangupBtn.style.display = "none";
+        joinBtn.disabled = false;
+        updateStatus("Ready. Enter a shared room name to connect.", "info");
+        
+        isConnecting = false;
+    }
+
+    hangupBtn.onclick = () => {
+        socket.emit('leave-room', { roomName });
+        resetApp();
+    };
+
+    function handleRemoteDisconnect() {
+        resetApp();
+        updateStatus("The other device disconnected.", "info");
+    }
+
+    window.addEventListener('beforeunload', () => {
+        if (socket) socket.emit('leave-room', { roomName });
+        resetApp();
+    });
+</script>
+</body>
+</html>
